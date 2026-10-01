@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
@@ -22,6 +22,30 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 }));
 app.use(express.json());
+// Render and Vercel sit behind a proxy; trust it so req.ip is the real client IP for rate limiting
+app.set('trust proxy', 1);
+
+// Simple in-memory fixed-window rate limiter
+const rateLimit = (max: number, windowMs: number, keyFn: (req: Request) => string) => {
+  const hits = new Map<string, { count: number; resetAt: number }>();
+  return (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    const key = keyFn(req);
+    const entry = hits.get(key);
+    if (!entry || entry.resetAt <= now) {
+      hits.set(key, { count: 1, resetAt: now + windowMs });
+      if (hits.size > 10000) {
+        for (const [k, v] of hits) if (v.resetAt <= now) hits.delete(k);
+      }
+      return next();
+    }
+    if (++entry.count > max) {
+      res.setHeader('Retry-After', Math.ceil((entry.resetAt - now) / 1000));
+      return res.status(429).json({ success: false, message: 'Too many requests. Please wait and try again.' });
+    }
+    return next();
+  };
+};
 
 // Initialize DB
 connectDB();
@@ -68,7 +92,21 @@ const publicUser = ({ passwordHash, ...user }: FarmerAccount) => ({ ...user, ver
 const signToken = (user: FarmerAccount) =>
   jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 
-app.post('/api/auth/register', async (req, res) => {
+// Returns the signed-in account for a request's Bearer token, or null
+const accountFromRequest = (req: Request): FarmerAccount | null => {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as { email: string };
+    return farmerAccounts.get(payload.email) || null;
+  } catch {
+    return null;
+  }
+};
+
+// 10 sign-in / sign-up attempts per IP every 15 minutes
+const authAttemptLimit = rateLimit(10, 15 * 60 * 1000, (req) => req.ip || 'unknown');
+
+app.post('/api/auth/register', authAttemptLimit, async (req, res) => {
   const { fullName, email, phone, password, preferredLanguage } = req.body;
   if (!email || !fullName || !password) {
     return res.status(400).json({ success: false, message: 'Full name, email and password are required.' });
@@ -99,7 +137,7 @@ app.post('/api/auth/register', async (req, res) => {
   });
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authAttemptLimit, async (req, res) => {
   const { email, password } = req.body;
   const account = farmerAccounts.get(String(email || '').trim().toLowerCase());
   if (!account || !password || !(await bcrypt.compare(String(password), account.passwordHash))) {
@@ -113,16 +151,18 @@ app.post('/api/auth/login', async (req, res) => {
   });
 });
 
-app.get('/api/auth/me', (req, res) => {
-  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  try {
-    const payload = jwt.verify(token, JWT_SECRET) as { email: string };
-    const account = farmerAccounts.get(payload.email);
-    if (!account) throw new Error('Unknown user');
-    return res.status(200).json({ success: true, user: publicUser(account) });
-  } catch {
+// Every API route registered after this point requires a signed-in farmer
+app.use('/api', (req, res, next) => {
+  const account = accountFromRequest(req);
+  if (!account) {
     return res.status(401).json({ success: false, message: 'Not signed in.' });
   }
+  res.locals.account = account;
+  return next();
+});
+
+app.get('/api/auth/me', (req, res) => {
+  res.status(200).json({ success: true, user: publicUser(res.locals.account) });
 });
 
 /* ============================================================
@@ -507,7 +547,10 @@ const askGroq = async (question: string, language: string, farmContext: object):
   }
 };
 
-app.post('/api/ai/ask', async (req, res) => {
+// 20 chatbot questions per farmer per minute, to protect the Groq quota
+const aiAskLimit = rateLimit(20, 60 * 1000, (req) => req.headers.authorization || req.ip || 'unknown');
+
+app.post('/api/ai/ask', aiAskLimit, async (req, res) => {
   const { question, language = 'en' } = req.body;
   const qLower = (question || '').toLowerCase();
 

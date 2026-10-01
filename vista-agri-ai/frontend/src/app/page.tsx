@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ShieldCheck,
   ShieldAlert,
@@ -42,11 +42,17 @@ export default function VistaAgriApp() {
   // Authentication: the login page is shown until the farmer signs in
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  // Kept in a ref so the polling interval always sends the current token
+  const authTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem(AUTH_STORAGE_KEY);
-      if (saved) setAuthUser(JSON.parse(saved).user);
+      if (saved) {
+        const { user, token } = JSON.parse(saved);
+        authTokenRef.current = token;
+        setAuthUser(user);
+      }
     } catch {
       // Ignore unreadable storage and show the login page
     }
@@ -59,6 +65,7 @@ export default function VistaAgriApp() {
     } catch {
       // Storage unavailable: stay signed in for this session only
     }
+    authTokenRef.current = token;
     setAuthUser(user);
   };
 
@@ -66,7 +73,18 @@ export default function VistaAgriApp() {
     try {
       localStorage.removeItem(AUTH_STORAGE_KEY);
     } catch {}
+    authTokenRef.current = null;
     setAuthUser(null);
+  };
+
+  // fetch() for the backend API: sends the sign-in token and signs out if it has expired
+  const apiFetch = async (url: string, init: RequestInit = {}) => {
+    const res = await fetch(url, {
+      ...init,
+      headers: { ...init.headers, Authorization: `Bearer ${authTokenRef.current}` },
+    });
+    if (res.status === 401) handleLogout();
+    return res;
   };
 
   const [lang, setLang] = useState<Language>('en');
@@ -286,7 +304,7 @@ export default function VistaAgriApp() {
       }
 
       // 2. Fetch Live Notifications
-      const notifRes = await fetch(`${API_BASE}/notifications`);
+      const notifRes = await apiFetch(`${API_BASE}/notifications`);
       if (notifRes.ok) {
         const notifData = await notifRes.json();
         if (notifData.notifications && notifData.notifications.length > 0) {
@@ -308,7 +326,7 @@ export default function VistaAgriApp() {
       }
 
       // 3. Fetch Real Devices
-      const devRes = await fetch(`${API_BASE}/devices`);
+      const devRes = await apiFetch(`${API_BASE}/devices`);
       if (devRes.ok) {
         const devData = await devRes.json();
         if (devData.devices) {
@@ -319,7 +337,7 @@ export default function VistaAgriApp() {
       }
 
       // 4. Fetch Live Events
-      const evRes = await fetch(`${API_BASE}/events`);
+      const evRes = await apiFetch(`${API_BASE}/events`);
       if (evRes.ok) {
         const evData = await evRes.json();
         if (evData.events) {
@@ -330,7 +348,7 @@ export default function VistaAgriApp() {
       }
 
       // 5. Fetch Latest Protection Plan
-      const planRes = await fetch(`${API_BASE}/calculator/farm-protection-plan`);
+      const planRes = await apiFetch(`${API_BASE}/calculator/farm-protection-plan`);
       if (planRes.ok) {
         const pData = await planRes.json();
         if (pData.plan) {
@@ -348,16 +366,17 @@ export default function VistaAgriApp() {
   };
 
   useEffect(() => {
+    if (!authUser) return;
     fetchBackendData();
     const interval = setInterval(fetchBackendData, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [authUser]);
 
   // Emergency Siren Silence
   const handleEmergencyStop = async () => {
     setSirensActive(false);
     try {
-      await fetch(`${API_BASE}/sirens/emergency-stop`, { method: 'POST' });
+      await apiFetch(`${API_BASE}/sirens/emergency-stop`, { method: 'POST' });
     } catch {}
     showToast('🛑 All sirens silenced immediately.');
     fetchBackendData();
@@ -368,7 +387,7 @@ export default function VistaAgriApp() {
     setSirensActive(true);
     playGentleAlertSound();
     try {
-      await fetch(`${API_BASE}/sirens/siren-02/test`, { method: 'POST' });
+      await apiFetch(`${API_BASE}/sirens/siren-02/test`, { method: 'POST' });
     } catch {}
     showToast('🔔 Gentle acoustic alert chime sounded on Siren #2.');
     setTimeout(() => {
@@ -382,7 +401,7 @@ export default function VistaAgriApp() {
     setIsDemoSimulating(true);
     showToast('Simulating animal detection in crop zone...');
     try {
-      const res = await fetch(`${API_BASE}/demo/trigger-wild-boar`, { method: 'POST' });
+      const res = await apiFetch(`${API_BASE}/demo/trigger-wild-boar`, { method: 'POST' });
       if (res.ok) {
         setSirensActive(true);
         setFieldSafe(false);
@@ -412,7 +431,7 @@ export default function VistaAgriApp() {
     setIsAiLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/ai/ask`, {
+      const res = await apiFetch(`${API_BASE}/ai/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: query, language: lang }),
@@ -452,7 +471,7 @@ export default function VistaAgriApp() {
   const handleRecalculatePlan = async () => {
     setIsCalculating(true);
     try {
-      const res = await fetch(`${API_BASE}/calculator/calculate`, {
+      const res = await apiFetch(`${API_BASE}/calculator/calculate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -486,7 +505,7 @@ export default function VistaAgriApp() {
   // Save Plan to Database
   const handleSaveProtectionPlan = async () => {
     try {
-      const res = await fetch(`${API_BASE}/calculator/farm-protection-plan`, {
+      const res = await apiFetch(`${API_BASE}/calculator/farm-protection-plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -516,9 +535,9 @@ export default function VistaAgriApp() {
   const handleAcknowledgeAlert = async (id: string, eventId?: string) => {
     try {
       if (eventId) {
-        await fetch(`${API_BASE}/events/${eventId}/confirm`, { method: 'POST' });
+        await apiFetch(`${API_BASE}/events/${eventId}/confirm`, { method: 'POST' });
       }
-      await fetch(`${API_BASE}/notifications/${id}/read`, { method: 'POST' });
+      await apiFetch(`${API_BASE}/notifications/${id}/read`, { method: 'POST' });
       showToast('✅ Incident acknowledged by farmer.');
       fetchBackendData();
     } catch {
@@ -530,7 +549,7 @@ export default function VistaAgriApp() {
   const handleResolveAlert = async (id: string, eventId?: string) => {
     try {
       const targetId = eventId || id.replace('notif-', 'evt-');
-      await fetch(`${API_BASE}/events/${targetId}/resolve`, { method: 'POST' });
+      await apiFetch(`${API_BASE}/events/${targetId}/resolve`, { method: 'POST' });
       showToast('✅ Incident marked as RESOLVED in database.');
       fetchBackendData();
     } catch {
