@@ -1,0 +1,13 @@
+{
+  "name": "farmers-club-vista-agri-ai",
+  "version": "1.0.0",
+  "description": "VISTA AGRI AI - Visual Intelligence & Smart Farm Protection Platform",
+  "scripts": {
+    "dev": "npx -y concurrently -n \"API,WEB\" -c \"cyan,green\" \"npm --prefix vista-agri-ai/backend run dev\" \"npm --prefix vista-agri-ai/frontend run dev\"",
+    "dev:frontend": "npm --prefix vista-agri-ai/frontend run dev",
+    "dev:backend": "npm --prefix vista-agri-ai/backend run dev",
+    "start": "npm run dev"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
