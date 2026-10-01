@@ -750,7 +750,7 @@ export default function VistaAgriApp() {
                   {calcInputs.farmName} • {calcInputs.area} {calcInputs.unit} ({calcInputs.crop})
                 </span>
                 <h1 className="text-2xl lg:text-3xl font-black mt-2 text-white tracking-tight">
-                  Good Morning, Ramesh Patel
+                  {new Date().getHours() < 12 ? 'Good Morning' : new Date().getHours() < 17 ? 'Good Afternoon' : 'Good Evening'}, {authUser.fullName}
                 </h1>
                 <p className="text-emerald-100/90 text-sm mt-2 leading-relaxed">
                   Your smart agricultural intelligence engine is monitoring crop health, tracking wildlife corridors, and safeguarding field perimeters with automated acoustic deterrents.

@@ -168,13 +168,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ apiBase, onLogin }) => {
             <span>{mode === 'signin' ? 'Sign In' : 'Create Account'}</span>
           </button>
         </form>
-
-        {mode === 'signin' && (
-          <p className="text-xs text-emerald-200/70 text-center mt-5">
-            Demo account: <span className="font-bold text-white">farmer@vistaagri.ai</span> /{' '}
-            <span className="font-bold text-white">farmer123</span>
-          </p>
-        )}
       </div>
     </div>
   );

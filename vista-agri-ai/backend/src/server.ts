@@ -66,7 +66,7 @@ app.get('/health', (req, res) => {
 /* ============================================================
                       2. AUTHENTICATION
 ============================================================ */
-// In-memory farmer accounts (reset on server restart). Seeded with a demo account.
+// In-memory farmer accounts (reset on server restart)
 interface FarmerAccount {
   id: string;
   fullName: string;
@@ -79,25 +79,20 @@ interface FarmerAccount {
 // Without a configured secret, use a random one so tokens can't be forged (they reset on restart).
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const farmerAccounts = new Map<string, FarmerAccount>();
-farmerAccounts.set('farmer@vistaagri.ai', {
-  id: 'usr-farmer-01',
-  fullName: 'Ramesh Patel',
-  email: 'farmer@vistaagri.ai',
-  phone: '+91 98765 43210',
-  preferredLanguage: 'en',
-  passwordHash: bcrypt.hashSync('farmer123', 10),
-});
 
 const publicUser = ({ passwordHash, ...user }: FarmerAccount) => ({ ...user, verified: true });
-const signToken = (user: FarmerAccount) =>
-  jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+type PublicUser = ReturnType<typeof publicUser>;
 
-// Returns the signed-in account for a request's Bearer token, or null
-const accountFromRequest = (req: Request): FarmerAccount | null => {
+// The token carries the farmer's profile, so sessions survive server restarts
+const signToken = (user: FarmerAccount) =>
+  jwt.sign({ user: publicUser(user) }, JWT_SECRET, { expiresIn: '7d' });
+
+// Returns the signed-in farmer for a request's Bearer token, or null
+const userFromRequest = (req: Request): PublicUser | null => {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as { email: string };
-    return farmerAccounts.get(payload.email) || null;
+    const payload = jwt.verify(token, JWT_SECRET) as { user?: PublicUser };
+    return payload.user || null;
   } catch {
     return null;
   }
@@ -153,16 +148,16 @@ app.post('/api/auth/login', authAttemptLimit, async (req, res) => {
 
 // Every API route registered after this point requires a signed-in farmer
 app.use('/api', (req, res, next) => {
-  const account = accountFromRequest(req);
-  if (!account) {
+  const user = userFromRequest(req);
+  if (!user) {
     return res.status(401).json({ success: false, message: 'Not signed in.' });
   }
-  res.locals.account = account;
+  res.locals.user = user;
   return next();
 });
 
 app.get('/api/auth/me', (req, res) => {
-  res.status(200).json({ success: true, user: publicUser(res.locals.account) });
+  res.status(200).json({ success: true, user: res.locals.user });
 });
 
 /* ============================================================
