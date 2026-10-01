@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import connectDB from './config/db';
 import { dbStore, FarmProtectionPlan, EventItem, NotificationItem } from './models/store';
 
@@ -51,7 +52,8 @@ interface FarmerAccount {
   passwordHash: string;
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'vista-agri-dev-secret';
+// Without a configured secret, use a random one so tokens can't be forged (they reset on restart).
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const farmerAccounts = new Map<string, FarmerAccount>();
 farmerAccounts.set('farmer@vistaagri.ai', {
   id: 'usr-farmer-01',
