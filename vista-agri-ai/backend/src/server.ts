@@ -621,9 +621,14 @@ Monitoring 10 Acres Cotton across 8 camera zones and 4 acoustic sirens. Current 
 /* ============================================================
                       START SERVER
 ============================================================ */
-app.listen(PORT, () => {
-  console.log(`============================================================`);
-  console.log(`🌾 VISTA AGRI AI - BACKEND ENGINE RUNNING ON PORT ${PORT}`);
-  console.log(`📡 SEE • TRACK • PROTECT • UNDERSTAND • ACT`);
-  console.log(`============================================================`);
-});
+// Only listen when running directly (local dev). Vercel imports this as a module.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`============================================================`);
+    console.log(`🌾 VISTA AGRI AI - BACKEND ENGINE RUNNING ON PORT ${PORT}`);
+    console.log(`📡 SEE • TRACK • PROTECT • UNDERSTAND • ACT`);
+    console.log(`============================================================`);
+  });
+}
+
+export default app;
