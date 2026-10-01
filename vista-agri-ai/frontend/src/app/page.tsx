@@ -26,15 +26,49 @@ import {
   Video,
   Radio,
   Wifi,
-  WifiOff
+  WifiOff,
+  LogOut
 } from 'lucide-react';
 import { MaizeCornLogo } from '@/components/MaizeCornLogo';
 import { translations, Language } from '@/lib/translations';
+import { LoginPage, AuthUser } from '@/components/LoginPage';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 const API_BASE = `${BACKEND_URL}/api`;
 
+const AUTH_STORAGE_KEY = 'vista-auth';
+
 export default function VistaAgriApp() {
+  // Authentication: the login page is shown until the farmer signs in
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(AUTH_STORAGE_KEY);
+      if (saved) setAuthUser(JSON.parse(saved).user);
+    } catch {
+      // Ignore unreadable storage and show the login page
+    }
+    setAuthChecked(true);
+  }, []);
+
+  const handleLogin = (user: AuthUser, token: string) => {
+    try {
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user, token }));
+    } catch {
+      // Storage unavailable: stay signed in for this session only
+    }
+    setAuthUser(user);
+  };
+
+  const handleLogout = () => {
+    try {
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+    } catch {}
+    setAuthUser(null);
+  };
+
   const [lang, setLang] = useState<Language>('en');
   const [activeTab, setActiveTab] = useState<'dashboard' | 'calculator' | 'fieldwork' | 'vision' | 'alerts' | 'devices' | 'ai'>('dashboard');
 
@@ -504,6 +538,9 @@ export default function VistaAgriApp() {
     }
   };
 
+  if (!authChecked) return null;
+  if (!authUser) return <LoginPage apiBase={API_BASE} onLogin={handleLogin} />;
+
   return (
     <div className="relative min-h-screen text-white font-sans selection:bg-emerald-500 selection:text-white overflow-x-hidden">
       {/* BACKGROUND IMAGE: Green Tractor & Rolling Hills Scenery sent by user */}
@@ -632,6 +669,16 @@ export default function VistaAgriApp() {
               </button>
             ))}
           </div>
+
+          {/* Signed-in Farmer & Sign Out */}
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-1.5 bg-emerald-900/60 hover:bg-emerald-800 text-white border border-emerald-500/40 px-3.5 py-1.5 rounded-full text-xs font-bold transition"
+            title={`Signed in as ${authUser.email}`}
+          >
+            <LogOut className="w-4 h-4 text-emerald-300" />
+            <span>Sign Out ({authUser.fullName.split(' ')[0]})</span>
+          </button>
         </div>
       </header>
 

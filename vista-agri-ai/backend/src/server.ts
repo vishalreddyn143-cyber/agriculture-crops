@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import connectDB from './config/db';
 import { dbStore, FarmProtectionPlan, EventItem, NotificationItem } from './models/store';
 
@@ -39,55 +41,86 @@ app.get('/health', (req, res) => {
 /* ============================================================
                       2. AUTHENTICATION
 ============================================================ */
-app.post('/api/auth/register', (req, res) => {
+// In-memory farmer accounts (reset on server restart). Seeded with a demo account.
+interface FarmerAccount {
+  id: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  preferredLanguage: string;
+  passwordHash: string;
+}
+
+const JWT_SECRET = process.env.JWT_SECRET || 'vista-agri-dev-secret';
+const farmerAccounts = new Map<string, FarmerAccount>();
+farmerAccounts.set('farmer@vistaagri.ai', {
+  id: 'usr-farmer-01',
+  fullName: 'Ramesh Patel',
+  email: 'farmer@vistaagri.ai',
+  phone: '+91 98765 43210',
+  preferredLanguage: 'en',
+  passwordHash: bcrypt.hashSync('farmer123', 10),
+});
+
+const publicUser = ({ passwordHash, ...user }: FarmerAccount) => ({ ...user, verified: true });
+const signToken = (user: FarmerAccount) =>
+  jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+
+app.post('/api/auth/register', async (req, res) => {
   const { fullName, email, phone, password, preferredLanguage } = req.body;
-  if (!email || !fullName) {
-    return res.status(400).json({ success: false, message: 'Full name and email are required.' });
+  if (!email || !fullName || !password) {
+    return res.status(400).json({ success: false, message: 'Full name, email and password are required.' });
   }
+  if (String(password).length < 6) {
+    return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+  }
+  const key = String(email).trim().toLowerCase();
+  if (farmerAccounts.has(key)) {
+    return res.status(409).json({ success: false, message: 'An account with this email already exists.' });
+  }
+
+  const account: FarmerAccount = {
+    id: `usr-${Date.now()}`,
+    fullName: String(fullName).trim(),
+    email: key,
+    phone: phone || '',
+    preferredLanguage: preferredLanguage || 'en',
+    passwordHash: await bcrypt.hash(String(password), 10),
+  };
+  farmerAccounts.set(key, account);
 
   return res.status(201).json({
     success: true,
-    message: 'Farmer account created successfully. Verification code sent.',
-    user: {
-      id: 'usr-farmer-01',
-      fullName,
-      email,
-      phone: phone || '+91 98765 43210',
-      preferredLanguage: preferredLanguage || 'en',
-      verified: true,
-    },
-    token: 'jwt_vista_mock_token_farmer_01',
+    message: 'Farmer account created successfully.',
+    user: publicUser(account),
+    token: signToken(account),
   });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
+  const account = farmerAccounts.get(String(email || '').trim().toLowerCase());
+  if (!account || !password || !(await bcrypt.compare(String(password), account.passwordHash))) {
+    return res.status(401).json({ success: false, message: 'Invalid email or password.' });
+  }
   return res.status(200).json({
     success: true,
     message: 'Welcome back to VISTA AGRI AI',
-    user: {
-      id: 'usr-farmer-01',
-      fullName: 'Ramesh Patel',
-      email: email || 'farmer@vistaagri.ai',
-      phone: '+91 98765 43210',
-      preferredLanguage: 'en',
-      verified: true,
-    },
-    token: 'jwt_vista_mock_token_farmer_01',
+    user: publicUser(account),
+    token: signToken(account),
   });
 });
 
 app.get('/api/auth/me', (req, res) => {
-  res.status(200).json({
-    success: true,
-    user: {
-      id: 'usr-farmer-01',
-      fullName: 'Ramesh Patel',
-      email: 'farmer@vistaagri.ai',
-      preferredLanguage: 'en',
-      verified: true,
-    },
-  });
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as { email: string };
+    const account = farmerAccounts.get(payload.email);
+    if (!account) throw new Error('Unknown user');
+    return res.status(200).json({ success: true, user: publicUser(account) });
+  } catch {
+    return res.status(401).json({ success: false, message: 'Not signed in.' });
+  }
 });
 
 /* ============================================================
@@ -432,7 +465,47 @@ app.post('/api/demo/trigger-wild-boar', (req, res) => {
 /* ============================================================
              9. ASK VISTA AI (ENGLISH, TELUGU, HINDI)
 ============================================================ */
-app.post('/api/ai/ask', (req, res) => {
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const LANGUAGE_NAMES: Record<string, string> = { en: 'English', te: 'Telugu', hi: 'Hindi' };
+
+// Ask Groq for an answer grounded in the current farm state. Returns null if Groq is unavailable.
+const askGroq = async (question: string, language: string, farmContext: object): Promise<string | null> => {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        reasoning_effort: 'low',
+        temperature: 0.4,
+        max_completion_tokens: 1024,
+        messages: [
+          {
+            role: 'system',
+            content:
+              `You are VISTA Agri Assistant, a friendly expert agronomist helping Indian farmers protect their crops. ` +
+              `Answer in ${LANGUAGE_NAMES[language] || 'English'} only. Keep answers short, practical and use simple markdown (bold, bullet lists) with a relevant emoji. ` +
+              `Use this live farm data when it is relevant:\n${JSON.stringify(farmContext)}`,
+          },
+          { role: 'user', content: question },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      console.warn(`⚠️ [VISTA-AI] Groq request failed: ${response.status} ${await response.text()}`);
+      return null;
+    }
+    const data: any = await response.json();
+    return data.choices?.[0]?.message?.content?.trim() || null;
+  } catch (error: any) {
+    console.warn(`⚠️ [VISTA-AI] Groq request error: ${error.message}`);
+    return null;
+  }
+};
+
+app.post('/api/ai/ask', async (req, res) => {
   const { question, language = 'en' } = req.body;
   const qLower = (question || '').toLowerCase();
 
@@ -602,11 +675,30 @@ Monitoring 10 Acres Cotton across 8 camera zones and 4 acoustic sirens. Current 
   if (language === 'te') finalResponse = answerTe;
   if (language === 'hi') finalResponse = answerHi;
 
+  const groqReply = await askGroq(question || '', language, {
+    crop: plan?.crop || 'Cotton & Maize',
+    farmArea: `${plan?.fieldArea || 10} Acres`,
+    cameras: plan?.estimatedCameraCount || 8,
+    sirens: plan?.estimatedSirenCount || 4,
+    recentEvents: activeEvents.slice(0, 6).map((e) => ({
+      type: e.eventType,
+      object: e.objectType,
+      time: e.timestamp,
+      location: e.location,
+      severity: e.severity,
+      status: e.status,
+      observations: e.observations,
+      recommendedAction: e.recommendedAction,
+    })),
+  });
+  if (groqReply) finalResponse = groqReply;
+
   res.status(200).json({
     success: true,
     query: question,
     language,
     reply: finalResponse,
+    source: groqReply ? 'groq' : 'rules',
     contextSummary: {
       activeAlerts: activeEvents.length,
       fieldSafe: false,
