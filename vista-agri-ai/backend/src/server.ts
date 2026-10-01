@@ -6,7 +6,7 @@ import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import connectDB from './config/db';
-import { dbStore, FarmProtectionPlan, EventItem, NotificationItem } from './models/store';
+import { DataStore, createEmptyStore, FarmProtectionPlan, EventItem, NotificationItem } from './models/store';
 
 dotenv.config();
 
@@ -81,7 +81,7 @@ const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('he
 const farmerAccounts = new Map<string, FarmerAccount>();
 
 const publicUser = ({ passwordHash, ...user }: FarmerAccount) => ({ ...user, verified: true });
-type PublicUser = ReturnType<typeof publicUser>;
+type PublicUser = ReturnType<typeof publicUser> & { demo?: boolean };
 
 // The token carries the farmer's profile, so sessions survive server restarts
 const signToken = (user: FarmerAccount) =>
@@ -100,6 +100,38 @@ const userFromRequest = (req: Request): PublicUser | null => {
 
 // 10 sign-in / sign-up attempts per IP every 15 minutes
 const authAttemptLimit = rateLimit(10, 15 * 60 * 1000, (req) => req.ip || 'unknown');
+
+// Demo account: opened with the "Try demo" button and comes with the sample farm data
+const DEMO_USER = {
+  id: 'usr-demo',
+  fullName: 'Ramesh Patel',
+  email: 'demo@vistaagri.ai',
+  phone: '+91 98765 43210',
+  preferredLanguage: 'en',
+  verified: true,
+  demo: true,
+};
+
+// Each farmer gets their own farm data: the demo sees the sample farm, everyone else starts empty
+const farmStores = new Map<string, DataStore>();
+const db = (res: Response): DataStore => {
+  const userId: string = res.locals.user.id;
+  let store = farmStores.get(userId);
+  if (!store) {
+    store = userId === DEMO_USER.id ? new DataStore() : createEmptyStore();
+    farmStores.set(userId, store);
+  }
+  return store;
+};
+
+app.post('/api/auth/demo', authAttemptLimit, (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Welcome to the VISTA AGRI AI demo farm',
+    user: DEMO_USER,
+    token: jwt.sign({ user: DEMO_USER }, JWT_SECRET, { expiresIn: '1d' }),
+  });
+});
 
 app.post('/api/auth/register', authAttemptLimit, async (req, res) => {
   const { fullName, email, phone, password, preferredLanguage } = req.body;
@@ -164,7 +196,7 @@ app.get('/api/auth/me', (req, res) => {
                    3. FARMS & FIELDS
 ============================================================ */
 app.get('/api/farms', (req, res) => {
-  res.status(200).json({ success: true, farms: dbStore.farms });
+  res.status(200).json({ success: true, farms: db(res).farms });
 });
 
 app.post('/api/farms', (req, res) => {
@@ -180,19 +212,19 @@ app.post('/api/farms', (req, res) => {
     areaUnit: areaUnit || 'Acres',
     createdAt: new Date().toISOString(),
   };
-  dbStore.farms.unshift(newFarm);
+  db(res).farms.unshift(newFarm);
   res.status(201).json({ success: true, farm: newFarm });
 });
 
 app.get('/api/fields', (req, res) => {
-  res.status(200).json({ success: true, fields: dbStore.fields });
+  res.status(200).json({ success: true, fields: db(res).fields });
 });
 
 app.post('/api/fields', (req, res) => {
   const { farmId, name, area, shape, soilType, irrigationType, crop, cropStage, animalRisk } = req.body;
   const newField = {
     id: `field-${Date.now()}`,
-    farmId: farmId || dbStore.farms[0]?.id || 'farm-01',
+    farmId: farmId || db(res).farms[0]?.id || 'farm-01',
     name: name || 'Main Field Block',
     area: Number(area) || 5,
     shape: shape || 'Rectangle',
@@ -202,7 +234,7 @@ app.post('/api/fields', (req, res) => {
     cropStage: cropStage || 'Vegetative',
     animalRisk: animalRisk || 'HIGH',
   };
-  dbStore.fields.unshift(newField);
+  db(res).fields.unshift(newField);
   res.status(201).json({ success: true, field: newField });
 });
 
@@ -326,7 +358,7 @@ app.post('/api/calculator/farm-protection-plan', (req, res) => {
     calculationTimestamp: new Date().toISOString(),
   };
 
-  dbStore.protectionPlans.unshift(newPlan);
+  db(res).protectionPlans.unshift(newPlan);
   res.status(201).json({
     success: true,
     message: 'Farm Protection Plan saved successfully',
@@ -335,7 +367,7 @@ app.post('/api/calculator/farm-protection-plan', (req, res) => {
 });
 
 app.get('/api/calculator/farm-protection-plan', (req, res) => {
-  const latestPlan = dbStore.protectionPlans[0];
+  const latestPlan = db(res).protectionPlans[0];
   res.status(200).json({ success: true, plan: latestPlan });
 });
 
@@ -343,12 +375,12 @@ app.get('/api/calculator/farm-protection-plan', (req, res) => {
                       5. DEVICES & SIRENS
 ============================================================ */
 app.get('/api/devices', (req, res) => {
-  res.status(200).json({ success: true, devices: dbStore.devices });
+  res.status(200).json({ success: true, devices: db(res).devices });
 });
 
 app.post('/api/sirens/:id/test', (req, res) => {
   const { id } = req.params;
-  const siren = dbStore.devices.find((d) => d.id === id);
+  const siren = db(res).devices.find((d) => d.id === id);
   if (!siren) {
     return res.status(404).json({ success: false, message: 'Siren not found' });
   }
@@ -366,7 +398,7 @@ app.post('/api/sirens/:id/test', (req, res) => {
 });
 
 app.post('/api/sirens/emergency-stop', (req, res) => {
-  dbStore.devices.forEach((d) => {
+  db(res).devices.forEach((d) => {
     if (d.type === 'SIREN' && d.status === 'TRIGGERED') {
       d.status = 'ONLINE';
     }
@@ -382,11 +414,11 @@ app.post('/api/sirens/emergency-stop', (req, res) => {
                 6. EVENTS & LIFE CYCLE
 ============================================================ */
 app.get('/api/events', (req, res) => {
-  res.status(200).json({ success: true, events: dbStore.events });
+  res.status(200).json({ success: true, events: db(res).events });
 });
 
 app.get('/api/events/:id', (req, res) => {
-  const event = dbStore.events.find((e) => e.id === req.params.id);
+  const event = db(res).events.find((e) => e.id === req.params.id);
   if (!event) {
     return res.status(404).json({ success: false, message: 'Event not found' });
   }
@@ -394,7 +426,7 @@ app.get('/api/events/:id', (req, res) => {
 });
 
 app.post('/api/events/:id/resolve', (req, res) => {
-  const event = dbStore.events.find((e) => e.id === req.params.id);
+  const event = db(res).events.find((e) => e.id === req.params.id);
   if (!event) {
     return res.status(404).json({ success: false, message: 'Event not found' });
   }
@@ -407,7 +439,7 @@ app.post('/api/events/:id/resolve', (req, res) => {
 });
 
 app.post('/api/events/:id/confirm', (req, res) => {
-  const event = dbStore.events.find((e) => e.id === req.params.id);
+  const event = db(res).events.find((e) => e.id === req.params.id);
   if (!event) {
     return res.status(404).json({ success: false, message: 'Event not found' });
   }
@@ -423,11 +455,11 @@ app.post('/api/events/:id/confirm', (req, res) => {
                 7. NOTIFICATIONS ENGINE
 ============================================================ */
 app.get('/api/notifications', (req, res) => {
-  res.status(200).json({ success: true, notifications: dbStore.notifications });
+  res.status(200).json({ success: true, notifications: db(res).notifications });
 });
 
 app.post('/api/notifications/:id/read', (req, res) => {
-  const notif = dbStore.notifications.find((n) => n.id === req.params.id);
+  const notif = db(res).notifications.find((n) => n.id === req.params.id);
   if (notif) notif.read = true;
   res.status(200).json({ success: true, notification: notif });
 });
@@ -467,10 +499,10 @@ app.post('/api/demo/trigger-wild-boar', (req, res) => {
     sirenId: 'siren-02',
   };
 
-  dbStore.events.unshift(newEvent);
+  db(res).events.unshift(newEvent);
 
   // Trigger siren
-  const s2 = dbStore.devices.find((d) => d.id === 'siren-02');
+  const s2 = db(res).devices.find((d) => d.id === 'siren-02');
   if (s2) s2.status = 'TRIGGERED';
 
   // Push targeted notification
@@ -489,7 +521,7 @@ app.post('/api/demo/trigger-wild-boar', (req, res) => {
     read: false,
     channels: { web: true, mobile: true, siren: true, sms: true },
   };
-  dbStore.notifications.unshift(newNotif);
+  db(res).notifications.unshift(newNotif);
 
   res.status(201).json({
     success: true,
@@ -523,7 +555,8 @@ const askGroq = async (question: string, language: string, farmContext: object):
             role: 'system',
             content:
               `You are VISTA Agri Assistant, a friendly expert agronomist helping Indian farmers protect their crops. ` +
-              `Answer in ${LANGUAGE_NAMES[language] || 'English'} only. Keep answers short, practical and use simple markdown (bold, bullet lists) with a relevant emoji. ` +
+              `Answer in ${LANGUAGE_NAMES[language] || 'English'} only. Keep answers short, practical and use only bold text and bullet lists for formatting (no tables or headings), with a relevant emoji. ` +
+              `If farmSetUp is false, the farmer has not added their farm, devices or crops yet: never invent field events, and give general advice instead. ` +
               `Use this live farm data when it is relevant:\n${JSON.stringify(farmContext)}`,
           },
           { role: 'user', content: question },
@@ -549,9 +582,9 @@ app.post('/api/ai/ask', aiAskLimit, async (req, res) => {
   const { question, language = 'en' } = req.body;
   const qLower = (question || '').toLowerCase();
 
-  // Intelligent Context Grounding using actual dbStore events & plan
-  const activeEvents = dbStore.events;
-  const plan = dbStore.protectionPlans[0];
+  // Ground answers in this farmer's own events & plan
+  const activeEvents = db(res).events;
+  const plan = db(res).protectionPlans[0];
   const boarEvent = activeEvents.find((e) => e.eventType === 'ANIMAL');
   const damageEvent = activeEvents.find((e) => e.eventType === 'CROP_DAMAGE');
   const weedEvent = activeEvents.find((e) => e.eventType === 'WEED');
@@ -715,11 +748,28 @@ Monitoring 10 Acres Cotton across 8 camera zones and 4 acoustic sirens. Current 
   if (language === 'te') finalResponse = answerTe;
   if (language === 'hi') finalResponse = answerHi;
 
+  // The built-in answers describe the sample farm, so only the demo account gets them
+  const isDemo = res.locals.user.id === DEMO_USER.id;
+  if (!isDemo) {
+    finalResponse =
+      language === 'te'
+        ? '🌾 మీ పొలం వివరాలు ఇంకా జోడించబడలేదు. **స్మార్ట్ ఫార్మ్ ప్లానర్**లో మీ పొలాన్ని సెటప్ చేయండి. ప్రస్తుతం AI సహాయకుడు అందుబాటులో లేరు, దయచేసి కొద్దిసేపటి తర్వాత మళ్లీ ప్రయత్నించండి.'
+        : language === 'hi'
+        ? '🌾 आपके खेत की जानकारी अभी जोड़ी नहीं गई है। **स्मार्ट फार्म प्लानर** में अपना खेत सेट करें। AI सहायक अभी उपलब्ध नहीं है, कृपया थोड़ी देर बाद फिर से प्रयास करें।'
+        : "🌾 Your farm hasn't been set up yet. Start with the **Smart Farm Planner** to add your field. The AI assistant is unavailable right now, so please try again in a moment.";
+  }
+
+  const devices = db(res).devices;
+  const onlineCameras = devices.filter((d) => d.type === 'CAMERA' && d.status !== 'OFFLINE').length;
+  const onlineSirens = devices.filter((d) => d.type === 'SIREN' && d.status !== 'OFFLINE').length;
+
   const groqReply = await askGroq(question || '', language, {
-    crop: plan?.crop || 'Cotton & Maize',
-    farmArea: `${plan?.fieldArea || 10} Acres`,
-    cameras: plan?.estimatedCameraCount || 8,
-    sirens: plan?.estimatedSirenCount || 4,
+    farmerName: res.locals.user.fullName,
+    farmSetUp: Boolean(plan) || devices.length > 0,
+    crop: plan?.crop || 'not set',
+    farmArea: plan ? `${plan.fieldArea} Acres` : 'not set',
+    cameras: onlineCameras,
+    sirens: onlineSirens,
     recentEvents: activeEvents.slice(0, 6).map((e) => ({
       type: e.eventType,
       object: e.objectType,
@@ -740,15 +790,16 @@ Monitoring 10 Acres Cotton across 8 camera zones and 4 acoustic sirens. Current 
     reply: finalResponse,
     source: groqReply ? 'groq' : 'rules',
     contextSummary: {
-      activeAlerts: activeEvents.length,
-      fieldSafe: false,
-      crop: plan?.crop || 'Cotton & Maize',
-      farmArea: `${plan?.fieldArea || 10} Acres`,
-      onlineCameras: 8,
-      onlineSirens: 4,
+      activeAlerts: activeEvents.filter((e) => e.status !== 'RESOLVED').length,
+      fieldSafe: activeEvents.every((e) => e.status === 'RESOLVED'),
+      crop: plan?.crop || null,
+      farmArea: plan ? `${plan.fieldArea} Acres` : null,
+      onlineCameras,
+      onlineSirens,
     },
   });
 });
+
 
 /* ============================================================
                       START SERVER

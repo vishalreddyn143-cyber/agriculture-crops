@@ -367,4 +367,13 @@ export class DataStore {
   public sirenCooldownTimer: NodeJS.Timeout | null = null;
 }
 
-export const dbStore = new DataStore();
+// A store with no farm data, for newly registered farmers
+export const createEmptyStore = (): DataStore =>
+  Object.assign(new DataStore(), {
+    farms: [],
+    fields: [],
+    protectionPlans: [],
+    devices: [],
+    events: [],
+    notifications: [],
+  });

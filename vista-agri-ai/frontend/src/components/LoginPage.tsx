@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Mail, Lock, User, Phone, LogIn, UserPlus, Loader2 } from 'lucide-react';
+import { Mail, Lock, User, Phone, LogIn, UserPlus, Loader2, Sprout } from 'lucide-react';
 import { MaizeCornLogo } from '@/components/MaizeCornLogo';
 
 export interface AuthUser {
@@ -10,6 +10,7 @@ export interface AuthUser {
   email: string;
   phone?: string;
   preferredLanguage?: string;
+  demo?: boolean;
 }
 
 interface LoginPageProps {
@@ -26,17 +27,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({ apiBase, onLogin }) => {
   const update = (field: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((prev) => ({ ...prev, [field]: e.target.value }));
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitAuth = async (endpoint: string, body: object) => {
     setError(null);
     setIsSubmitting(true);
     try {
-      const res = await fetch(`${apiBase}/auth/${mode === 'signin' ? 'login' : 'register'}`, {
+      const res = await fetch(`${apiBase}/auth/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          mode === 'signin' ? { email: form.email, password: form.password } : form
-        ),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok || !data.success) {
@@ -49,6 +47,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({ apiBase, onLogin }) => {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (mode === 'signin') submitAuth('login', { email: form.email, password: form.password });
+    else submitAuth('register', form);
   };
 
   const inputClass =
@@ -168,6 +172,22 @@ export const LoginPage: React.FC<LoginPageProps> = ({ apiBase, onLogin }) => {
             <span>{mode === 'signin' ? 'Sign In' : 'Create Account'}</span>
           </button>
         </form>
+
+        <div className="flex items-center gap-3 my-5 text-xs text-emerald-200/60">
+          <span className="flex-1 h-px bg-emerald-500/30" />
+          or
+          <span className="flex-1 h-px bg-emerald-500/30" />
+        </div>
+
+        <button
+          type="button"
+          onClick={() => submitAuth('demo', {})}
+          disabled={isSubmitting}
+          className="w-full bg-transparent hover:bg-emerald-900/60 text-white font-bold py-3 rounded-xl border border-emerald-400/50 transition disabled:opacity-60 flex items-center justify-center gap-2"
+        >
+          <Sprout className="w-4 h-4 text-emerald-400" />
+          <span>Try the Demo Farm</span>
+        </button>
       </div>
     </div>
   );

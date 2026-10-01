@@ -38,7 +38,7 @@ const API_BASE = `${BACKEND_URL}/api`;
 
 const AUTH_STORAGE_KEY = 'vista-auth';
 
-export default function VistaAgriApp() {
+export default function Home() {
   // Authentication: the login page is shown until the farmer signs in
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -87,6 +87,23 @@ export default function VistaAgriApp() {
     return res;
   };
 
+  if (!authChecked) return null;
+  if (!authUser) return <LoginPage apiBase={API_BASE} onLogin={handleLogin} />;
+
+  // Keyed by user so switching accounts starts from a fresh dashboard
+  return <VistaAgriApp key={authUser.id} authUser={authUser} apiFetch={apiFetch} onLogout={handleLogout} />;
+}
+
+interface VistaAgriAppProps {
+  authUser: AuthUser;
+  apiFetch: (url: string, init?: RequestInit) => Promise<Response>;
+  onLogout: () => void;
+}
+
+function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
+  // The demo account shows the sample farm; other accounts start with an empty farm
+  const isDemo = Boolean(authUser.demo);
+
   const [lang, setLang] = useState<Language>('en');
   const [activeTab, setActiveTab] = useState<'dashboard' | 'calculator' | 'fieldwork' | 'vision' | 'alerts' | 'devices' | 'ai'>('dashboard');
 
@@ -98,41 +115,48 @@ export default function VistaAgriApp() {
   const [isCalculating, setIsCalculating] = useState(false);
 
   // Real-time states
-  const [fieldSafe, setFieldSafe] = useState(false);
-  const [sirensActive, setSirensActive] = useState(true);
+  const [fieldSafe, setFieldSafe] = useState(!isDemo);
+  const [sirensActive, setSirensActive] = useState(isDemo);
   const [isDemoSimulating, setIsDemoSimulating] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Simplified Smart Calculator State
-  const [calcInputs, setCalcInputs] = useState({
-    farmName: 'Warangal Golden Acres',
-    area: 10,
-    unit: 'Acres',
-    crop: 'Maize & Cotton',
-    animalRisk: 'HIGH',
-    entrances: 2,
-    existingCameras: 2,
-    existingSirens: 1,
-  });
+  const [calcInputs, setCalcInputs] = useState(
+    isDemo
+      ? {
+          farmName: 'Warangal Golden Acres',
+          area: 10,
+          unit: 'Acres',
+          crop: 'Maize & Cotton',
+          animalRisk: 'HIGH',
+          entrances: 2,
+          existingCameras: 2,
+          existingSirens: 1,
+        }
+      : {
+          farmName: `${authUser.fullName.split(' ')[0]}'s Farm`,
+          area: 5,
+          unit: 'Acres',
+          crop: 'Maize & Cotton',
+          animalRisk: 'MEDIUM',
+          entrances: 1,
+          existingCameras: 0,
+          existingSirens: 0,
+        }
+  );
 
-  const [calcResults, setCalcResults] = useState({
-    cameras: 8,
-    sirens: 4,
-    coverage: 94,
-    perimeter: 804,
-  });
+  const [calcResults, setCalcResults] = useState(
+    isDemo ? { cameras: 8, sirens: 4, coverage: 94, perimeter: 804 } : { cameras: 0, sirens: 0, coverage: 0, perimeter: 0 }
+  );
 
   // AI Assistant State
   const [aiQuery, setAiQuery] = useState('');
   const [aiChat, setAiChat] = useState<Array<{ sender: 'user' | 'ai'; text: string }>>([
     {
       sender: 'ai',
-      text:
-        lang === 'te'
-          ? 'నమస్కారం! నేను మీ విస్టా వ్యవసాయ సహాయకుడిని. ఈరోజు మీ పొలంలో ఏం జరిగిందో తెలుసుకోవాలనుకుంటున్నారా?'
-          : lang === 'hi'
-          ? 'नमस्ते! मैं आपका विस्टा कृषि सहायक हूँ। आज आपके खेत की स्थिति जानने के लिए नीचे दिए गए प्रश्नों को चुनें या पूछें।'
-          : 'Welcome to VISTA AGRI AI. Your fields are actively protected across 8 camera zones and 4 acoustic sirens. How can I assist your farm today?',
+      text: isDemo
+        ? 'Welcome to VISTA AGRI AI. Your fields are actively protected across 8 camera zones and 4 acoustic sirens. How can I assist your farm today?'
+        : `Hi ${authUser.fullName.split(' ')[0]}! I'm your VISTA farming assistant. Ask me anything about crops, pests, weather or protecting your fields, in English, Telugu or Hindi.`,
     },
   ]);
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -149,7 +173,7 @@ export default function VistaAgriApp() {
     action: string;
     status: string;
     severity: string;
-  }>>([
+  }>>(isDemo ? [
     {
       id: 'notif-01',
       eventId: 'evt-01',
@@ -186,7 +210,7 @@ export default function VistaAgriApp() {
       status: 'Scheduled',
       severity: 'LOW',
     },
-  ]);
+  ] : []);
 
   const t = translations[lang];
 
@@ -240,7 +264,7 @@ export default function VistaAgriApp() {
   }>({
     lat: 17.982,
     lng: 79.598,
-    region: 'Warangal Rural, Telangana',
+    region: isDemo ? 'Warangal Rural, Telangana' : 'Set Field Location',
     isDetecting: false,
     accuracy: 12,
   });
@@ -307,7 +331,7 @@ export default function VistaAgriApp() {
       const notifRes = await apiFetch(`${API_BASE}/notifications`);
       if (notifRes.ok) {
         const notifData = await notifRes.json();
-        if (notifData.notifications && notifData.notifications.length > 0) {
+        if (notifData.notifications) {
           setNotifications(
             notifData.notifications.map((n: any) => ({
               id: n.id,
@@ -384,6 +408,10 @@ export default function VistaAgriApp() {
 
   // Test Siren with Gentle Acoustic Alert Sound
   const handleTestSiren = async () => {
+    if (!devicesList.some((d) => d.type === 'SIREN')) {
+      showToast('No sirens connected to your farm yet.');
+      return;
+    }
     setSirensActive(true);
     playGentleAlertSound();
     try {
@@ -445,7 +473,9 @@ export default function VistaAgriApp() {
       }
     } catch {
       let fallbackText = '';
-      if (lang === 'te') {
+      if (!isDemo) {
+        fallbackText = 'The AI assistant is unavailable right now. Please try again in a moment.';
+      } else if (lang === 'te') {
         fallbackText =
           'ఈరోజు మీ పొలంలో ఉదయం 10:42 గంటలకు ఈశాన్య భాగంలో అడవి పంది రాగా సైరన్ #2 మోగించబడింది. తూర్పు సరిహద్దు వద్ద 0.8 ఎకరాలలో పంట ఒరిగిపోయినట్లు గుర్తించబడింది.';
       } else if (lang === 'hi') {
@@ -557,9 +587,6 @@ export default function VistaAgriApp() {
     }
   };
 
-  if (!authChecked) return null;
-  if (!authUser) return <LoginPage apiBase={API_BASE} onLogin={handleLogin} />;
-
   return (
     <div className="relative min-h-screen text-white font-sans selection:bg-emerald-500 selection:text-white overflow-x-hidden">
       {/* BACKGROUND IMAGE: Green Tractor & Rolling Hills Scenery sent by user */}
@@ -662,7 +689,8 @@ export default function VistaAgriApp() {
             <span>Field Work Mode</span>
           </button>
 
-          {/* Master Demo Trigger */}
+          {/* Master Demo Trigger (demo farm only) */}
+          {isDemo && (
           <button
             onClick={triggerMasterDemo}
             disabled={isDemoSimulating}
@@ -671,6 +699,7 @@ export default function VistaAgriApp() {
             <Activity className="w-4 h-4" />
             <span>{isDemoSimulating ? 'Simulating...' : 'Simulate Wild Boar'}</span>
           </button>
+          )}
 
           {/* Language Toggle in Green & White */}
           <div className="flex bg-emerald-900/60 border border-emerald-500/30 rounded-full p-0.5">
@@ -691,7 +720,7 @@ export default function VistaAgriApp() {
 
           {/* Signed-in Farmer & Sign Out */}
           <button
-            onClick={handleLogout}
+            onClick={onLogout}
             className="flex items-center gap-1.5 bg-emerald-900/60 hover:bg-emerald-800 text-white border border-emerald-500/40 px-3.5 py-1.5 rounded-full text-xs font-bold transition"
             title={`Signed in as ${authUser.email}`}
           >
@@ -707,7 +736,7 @@ export default function VistaAgriApp() {
           { id: 'dashboard', label: t.nav.dashboard, icon: Layers },
           { id: 'calculator', label: t.nav.calculator, icon: Sliders },
           { id: 'vision', label: t.nav.vision, icon: Video },
-          { id: 'alerts', label: t.nav.notifications, icon: Bell, badge: '3' },
+          { id: 'alerts', label: t.nav.notifications, icon: Bell, badge: notifications.filter((n) => n.status === 'Active Alert').length || undefined },
           { id: 'devices', label: t.nav.devices, icon: Cpu },
           { id: 'ai', label: t.nav.ai, icon: Sparkles },
         ].map((tab) => {
@@ -783,6 +812,8 @@ export default function VistaAgriApp() {
             </div>
 
             {/* 4 Clean Primary Status Cards in Green & White with Direct Backend AI Prompt Actions */}
+            {isDemo ? (
+
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-emerald-950/70 border border-emerald-500/30 rounded-2xl p-5 backdrop-blur-md flex flex-col justify-between">
                 <div>
@@ -882,10 +913,36 @@ export default function VistaAgriApp() {
                 </button>
               </div>
             </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {[
+                  { step: '1', title: 'Plan your farm', text: 'Enter your field size and crop to get a camera and siren layout.', tab: 'calculator' as const, cta: 'Open Smart Farm Planner' },
+                  { step: '2', title: 'Connect devices', text: 'Cameras and sirens you install will appear here once connected.', tab: 'devices' as const, cta: 'View Devices' },
+                  { step: '3', title: 'Ask VISTA AI', text: 'Get advice on crops, pests, weeds and irrigation in your language.', tab: 'ai' as const, cta: 'Ask a Question' },
+                ].map((card) => (
+                  <div key={card.step} className="bg-emerald-950/70 border border-emerald-500/30 rounded-2xl p-5 backdrop-blur-md flex flex-col justify-between">
+                    <div>
+                      <span className="text-xs font-bold text-emerald-300">Step {card.step}</span>
+                      <div className="text-lg font-black text-white mt-1">{card.title}</div>
+                      <p className="text-xs text-emerald-200/80 mt-1 font-medium">{card.text}</p>
+                    </div>
+                    <button
+                      onClick={() => setActiveTab(card.tab)}
+                      className="mt-3 text-[11px] font-bold text-emerald-300 hover:text-white flex items-center gap-1 bg-emerald-900/50 hover:bg-emerald-800 px-3 py-1.5 rounded-xl border border-emerald-400/30 w-fit transition shadow-sm"
+                    >
+                      <span>{card.cta}</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Field Map & Actionable Notifications */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Clean Visual Map Canvas */}
+            {isDemo ? (
+
               <div className="lg:col-span-2 bg-emerald-950/75 border border-emerald-500/30 rounded-3xl p-5 shadow-2xl backdrop-blur-md flex flex-col">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-2">
@@ -986,6 +1043,17 @@ export default function VistaAgriApp() {
                   </button>
                 </div>
               </div>
+            ) : (
+              <div className="lg:col-span-2">
+                <EmptyState
+                  icon={<MapPin className="w-8 h-8 text-emerald-400" />}
+                  title="No field boundary yet"
+                  text="Plan your farm to see where cameras and sirens should go on your field."
+                  actionLabel="Open Smart Farm Planner"
+                  onAction={() => setActiveTab('calculator')}
+                />
+              </div>
+            )}
 
               {/* Actionable Incident Feed */}
               <div className="bg-emerald-950/75 border border-emerald-500/30 rounded-3xl p-5 shadow-2xl backdrop-blur-md flex flex-col">
@@ -995,11 +1063,14 @@ export default function VistaAgriApp() {
                     <h2 className="font-extrabold text-sm text-white">Active Farm Incidents</h2>
                   </div>
                   <span className="text-xs bg-white text-emerald-950 font-black px-2 py-0.5 rounded-full">
-                    3 Logged
+                    {notifications.length} Logged
                   </span>
                 </div>
 
                 <div className="space-y-3 flex-1 overflow-y-auto max-h-[340px] pr-1">
+                  {notifications.length === 0 && (
+                    <p className="text-xs text-emerald-200/80 text-center py-8">No incidents yet. Alerts from your cameras will show up here.</p>
+                  )}
                   {notifications.map((n) => (
                     <div
                       key={n.id}
@@ -1219,6 +1290,8 @@ export default function VistaAgriApp() {
             </div>
 
             {/* Clean Touch Cards */}
+            {isDemo ? (
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-emerald-950/80 border-2 border-white rounded-3xl p-6 flex flex-col justify-between shadow-2xl backdrop-blur-md">
                 <div>
@@ -1286,13 +1359,31 @@ export default function VistaAgriApp() {
                 </button>
               </div>
             </div>
+            ) : (
+              <EmptyState
+                icon={<Sprout className="w-8 h-8 text-emerald-400" />}
+                title="No field tasks right now"
+                text="Intrusions, crop damage and weed hotspots found by your cameras will appear here as tasks."
+              />
+            )}
+
+
           </div>
         )}
 
         {/* ========================================================
                  TAB 4: LIVE VISION & OBJECT TRACKING
         ======================================================== */}
-        {activeTab === 'vision' && (
+        {activeTab === 'vision' && !isDemo && (
+          <EmptyState
+            icon={<Video className="w-8 h-8 text-emerald-400" />}
+            title="No cameras connected"
+            text="Once you connect a field camera, its live feed and AI animal detection will appear here."
+            actionLabel="View Devices"
+            onAction={() => setActiveTab('devices')}
+          />
+        )}
+        {activeTab === 'vision' && isDemo && (
           <div className="space-y-6">
             <div className="bg-emerald-950/80 border border-emerald-500/30 rounded-3xl p-6 shadow-2xl backdrop-blur-md">
               <div className="flex flex-wrap items-center justify-between gap-4 border-b border-emerald-500/20 pb-4 mb-4">
@@ -1367,6 +1458,9 @@ export default function VistaAgriApp() {
               </div>
 
               <div className="space-y-4">
+                {notifications.length === 0 && (
+                  <p className="text-xs text-emerald-200/80 text-center py-8">No incidents yet. Alerts from your cameras will show up here.</p>
+                )}
                 {notifications.map((n) => (
                   <div
                     key={n.id}
@@ -1437,7 +1531,16 @@ export default function VistaAgriApp() {
         {/* ========================================================
                  TAB 6: DEVICES & HARDWARE
         ======================================================== */}
-        {activeTab === 'devices' && (
+        {activeTab === 'devices' && !isDemo && (
+          <EmptyState
+            icon={<Cpu className="w-8 h-8 text-emerald-400" />}
+            title="No devices connected yet"
+            text="Use the Smart Farm Planner to work out how many cameras and sirens your field needs. Connected devices will be listed here."
+            actionLabel="Open Smart Farm Planner"
+            onAction={() => setActiveTab('calculator')}
+          />
+        )}
+        {activeTab === 'devices' && isDemo && (
           <div className="space-y-6">
             <div className="bg-emerald-950/80 border border-emerald-500/30 rounded-3xl p-6 shadow-2xl backdrop-blur-md">
               <div className="flex items-center justify-between border-b border-emerald-500/20 pb-4 mb-4">
@@ -1578,7 +1681,7 @@ export default function VistaAgriApp() {
 
               {/* Suggested Questions */}
               <div className="py-2.5 border-t border-emerald-500/20 flex flex-wrap gap-2">
-                {t.ai.suggestions.map((s, idx) => (
+                {(isDemo ? t.ai.suggestions : t.ai.starterSuggestions).map((s, idx) => (
                   <button
                     key={idx}
                     onClick={() => handleAskAi(s)}
@@ -1622,6 +1725,33 @@ export default function VistaAgriApp() {
           Smart Visual Intelligence for Safer and More Productive Farming.
         </p>
       </footer>
+    </div>
+  );
+}
+
+interface EmptyStateProps {
+  icon: React.ReactNode;
+  title: string;
+  text: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}
+
+function EmptyState({ icon, title, text, actionLabel, onAction }: EmptyStateProps) {
+  return (
+    <div className="h-full bg-emerald-950/75 border border-dashed border-emerald-500/40 rounded-3xl p-8 shadow-2xl backdrop-blur-md flex flex-col items-center justify-center text-center gap-3 min-h-[260px]">
+      {icon}
+      <h2 className="font-extrabold text-base text-white">{title}</h2>
+      <p className="text-xs text-emerald-200/80 max-w-md">{text}</p>
+      {actionLabel && onAction && (
+        <button
+          onClick={onAction}
+          className="mt-2 bg-white hover:bg-emerald-50 text-emerald-950 font-extrabold text-xs px-5 py-2.5 rounded-xl shadow-lg transition flex items-center gap-2"
+        >
+          {actionLabel}
+          <ChevronRight className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }
