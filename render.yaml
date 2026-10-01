@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: vista-agri-backend
+    env: node
+    region: singapore
+    rootDir: vista-agri-ai/backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        sync: false
+      - key: MONGODB_URI
+        sync: false
