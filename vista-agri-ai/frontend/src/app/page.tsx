@@ -577,6 +577,8 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
 
   // Mark Resolved in Database
   const handleResolveAlert = async (id: string, eventId?: string) => {
+    // Remove it right away; the backend stops returning resolved alerts
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
     try {
       const targetId = eventId || id.replace('notif-', 'evt-');
       await apiFetch(`${API_BASE}/events/${targetId}/resolve`, { method: 'POST' });

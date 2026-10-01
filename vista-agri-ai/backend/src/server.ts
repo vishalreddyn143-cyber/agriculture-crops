@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import { FarmerAccount, findFarmerByEmail, createFarmer, DuplicateEmailError } from './models/farmerAccounts';
 import connectDB from './config/db';
 import { DataStore, createEmptyStore, FarmProtectionPlan, EventItem, NotificationItem } from './models/store';
 
@@ -66,19 +67,8 @@ app.get('/health', (req, res) => {
 /* ============================================================
                       2. AUTHENTICATION
 ============================================================ */
-// In-memory farmer accounts (reset on server restart)
-interface FarmerAccount {
-  id: string;
-  fullName: string;
-  email: string;
-  phone: string;
-  preferredLanguage: string;
-  passwordHash: string;
-}
-
 // Without a configured secret, use a random one so tokens can't be forged (they reset on restart).
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
-const farmerAccounts = new Map<string, FarmerAccount>();
 
 const publicUser = ({ passwordHash, ...user }: FarmerAccount) => ({ ...user, verified: true });
 type PublicUser = ReturnType<typeof publicUser> & { demo?: boolean };
@@ -141,20 +131,22 @@ app.post('/api/auth/register', authAttemptLimit, async (req, res) => {
   if (String(password).length < 6) {
     return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
   }
-  const key = String(email).trim().toLowerCase();
-  if (farmerAccounts.has(key)) {
-    return res.status(409).json({ success: false, message: 'An account with this email already exists.' });
+  let account: FarmerAccount;
+  try {
+    account = await createFarmer({
+      fullName: String(fullName).trim(),
+      email: String(email).trim().toLowerCase(),
+      phone: phone || '',
+      preferredLanguage: preferredLanguage || 'en',
+      passwordHash: await bcrypt.hash(String(password), 10),
+    });
+  } catch (error: any) {
+    if (error instanceof DuplicateEmailError) {
+      return res.status(409).json({ success: false, message: 'An account with this email already exists.' });
+    }
+    console.error(`❌ [VISTA-AUTH] ${error.message}`);
+    return res.status(500).json({ success: false, message: 'Could not create your account. Please try again.' });
   }
-
-  const account: FarmerAccount = {
-    id: `usr-${Date.now()}`,
-    fullName: String(fullName).trim(),
-    email: key,
-    phone: phone || '',
-    preferredLanguage: preferredLanguage || 'en',
-    passwordHash: await bcrypt.hash(String(password), 10),
-  };
-  farmerAccounts.set(key, account);
 
   return res.status(201).json({
     success: true,
@@ -166,7 +158,13 @@ app.post('/api/auth/register', authAttemptLimit, async (req, res) => {
 
 app.post('/api/auth/login', authAttemptLimit, async (req, res) => {
   const { email, password } = req.body;
-  const account = farmerAccounts.get(String(email || '').trim().toLowerCase());
+  let account: FarmerAccount | null;
+  try {
+    account = await findFarmerByEmail(String(email || '').trim().toLowerCase());
+  } catch (error: any) {
+    console.error(`❌ [VISTA-AUTH] ${error.message}`);
+    return res.status(500).json({ success: false, message: 'Could not sign you in. Please try again.' });
+  }
   if (!account || !password || !(await bcrypt.compare(String(password), account.passwordHash))) {
     return res.status(401).json({ success: false, message: 'Invalid email or password.' });
   }
@@ -455,7 +453,10 @@ app.post('/api/events/:id/confirm', (req, res) => {
                 7. NOTIFICATIONS ENGINE
 ============================================================ */
 app.get('/api/notifications', (req, res) => {
-  res.status(200).json({ success: true, notifications: db(res).notifications });
+  // Alerts whose incident has been resolved are closed and no longer listed
+  const resolvedEventIds = new Set(db(res).events.filter((e) => e.status === 'RESOLVED').map((e) => e.id));
+  const openNotifications = db(res).notifications.filter((n) => !resolvedEventIds.has(n.eventId));
+  res.status(200).json({ success: true, notifications: openNotifications });
 });
 
 app.post('/api/notifications/:id/read', (req, res) => {
