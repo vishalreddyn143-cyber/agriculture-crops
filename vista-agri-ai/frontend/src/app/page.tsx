@@ -34,7 +34,8 @@ import { translations, Language } from '@/lib/translations';
 import { LoginPage, AuthUser } from '@/components/LoginPage';
 import { LiveVision, VisionAlertResult } from '@/components/LiveVision';
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+// Trailing slashes would produce `//api/...` URLs, which Vercel redirects and browsers then block
+const BACKEND_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
 const API_BASE = `${BACKEND_URL}/api`;
 
 const AUTH_STORAGE_KEY = 'vista-auth';
