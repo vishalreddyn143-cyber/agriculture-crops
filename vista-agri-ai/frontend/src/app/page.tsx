@@ -27,12 +27,16 @@ import {
   Radio,
   Wifi,
   WifiOff,
-  LogOut
+  LogOut,
+  Leaf,
+  ScanFace
 } from 'lucide-react';
 import { MaizeCornLogo } from '@/components/MaizeCornLogo';
 import { translations, Language } from '@/lib/translations';
 import { LoginPage, AuthUser } from '@/components/LoginPage';
 import { LiveVision, VisionAlertResult } from '@/components/LiveVision';
+import { PlantDoctor } from '@/components/PlantDoctor';
+import { FaceScanModal, FaceCaptureResult } from '@/components/FaceScanModal';
 
 // Trailing slashes would produce `//api/...` URLs, which Vercel redirects and browsers then block
 const BACKEND_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
@@ -93,21 +97,29 @@ export default function Home() {
   if (!authUser) return <LoginPage apiBase={API_BASE} onLogin={handleLogin} />;
 
   // Keyed by user so switching accounts starts from a fresh dashboard
-  return <VistaAgriApp key={authUser.id} authUser={authUser} apiFetch={apiFetch} onLogout={handleLogout} />;
+  return (
+    <VistaAgriApp key={authUser.id} authUser={authUser} apiFetch={apiFetch} onLogout={handleLogout} onSessionUpdate={handleLogin} />
+  );
 }
 
 interface VistaAgriAppProps {
   authUser: AuthUser;
   apiFetch: (url: string, init?: RequestInit) => Promise<Response>;
   onLogout: () => void;
+  // Replaces the stored profile and token, e.g. after turning face sign-in on
+  onSessionUpdate: (user: AuthUser, token: string) => void;
 }
 
-function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
+function VistaAgriApp({ authUser, apiFetch, onLogout, onSessionUpdate }: VistaAgriAppProps) {
   // The demo account shows the sample farm; other accounts start with an empty farm
   const isDemo = Boolean(authUser.demo);
 
   const [lang, setLang] = useState<Language>('en');
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'calculator' | 'fieldwork' | 'vision' | 'alerts' | 'devices' | 'ai'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'calculator' | 'fieldwork' | 'vision' | 'plant' | 'alerts' | 'devices' | 'ai'>('dashboard');
+  const [faceScanOpen, setFaceScanOpen] = useState(false);
+  const [faceMenuOpen, setFaceMenuOpen] = useState(false);
+  // The farmer's saved face photo, loaded when the face login menu opens
+  const [facePhoto, setFacePhoto] = useState<string | null>(null);
 
   // Backend Connection & Live Synchronization State
   const [backendConnected, setBackendConnected] = useState(false);
@@ -464,6 +476,57 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
     fetchBackendData();
   };
 
+  // Face sign-in: save this farmer's face photo (and the descriptor computed from it), or remove it
+  const saveFaceLogin = async ({ descriptor, photo }: { descriptor: number[]; photo: string }): Promise<FaceCaptureResult> => {
+    try {
+      const res = await apiFetch(`${API_BASE}/auth/face`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ descriptor, photo }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) return { error: data.message || 'Could not save your face. Please try again.' };
+      onSessionUpdate(data.user, data.token);
+      setFacePhoto(photo);
+      return {};
+    } catch {
+      return { error: 'Cannot reach the VISTA server. Please check your connection.' };
+    }
+  };
+
+  const finishFaceSetup = () => {
+    setFaceScanOpen(false);
+    showToast('✅ Photo saved. Next time, tap "Sign in with Photo".');
+  };
+
+  const toggleFaceMenu = async () => {
+    const opening = !faceMenuOpen;
+    setFaceMenuOpen(opening);
+    if (opening && !facePhoto) {
+      try {
+        const data = await (await apiFetch(`${API_BASE}/auth/face`)).json();
+        if (data.success) setFacePhoto(data.photo);
+      } catch {
+        // The menu still works without the preview
+      }
+    }
+  };
+
+  const removeFaceLogin = async () => {
+    setFaceMenuOpen(false);
+    try {
+      const res = await apiFetch(`${API_BASE}/auth/face`, { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        onSessionUpdate(data.user, data.token);
+        setFacePhoto(null);
+        showToast('Photo login turned off.');
+      } else showToast(data.message || 'Could not turn off face login.');
+    } catch {
+      showToast('Cannot reach the VISTA server.');
+    }
+  };
+
   // Ask VISTA AI
   const handleAskAi = async (customPrompt?: string) => {
     const query = customPrompt || aiQuery;
@@ -626,6 +689,8 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
         </div>
       )}
 
+      {faceScanOpen && <FaceScanModal mode="enroll" onCapture={saveFaceLogin} onSuccess={finishFaceSetup} onClose={() => setFaceScanOpen(false)} />}
+
       {/* TOP HEADER */}
       <header className="relative z-30 bg-emerald-950/80 backdrop-blur-md border-b border-emerald-500/20 px-4 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
         {/* Luxury Maize Corn Logo */}
@@ -736,6 +801,48 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
             ))}
           </div>
 
+          {/* Face sign-in setup (real accounts only) */}
+          {!isDemo && (
+            <div className="relative">
+              <button
+                onClick={() => (authUser.hasFaceLogin ? toggleFaceMenu() : setFaceScanOpen(true))}
+                className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition border ${
+                  authUser.hasFaceLogin
+                    ? 'bg-emerald-500/20 text-emerald-100 border-emerald-400/60'
+                    : 'bg-white text-emerald-950 border-white hover:bg-emerald-50'
+                }`}
+              >
+                <ScanFace className="w-4 h-4" />
+                <span>{authUser.hasFaceLogin ? 'Photo Login On' : 'Set up Photo Login'}</span>
+              </button>
+              {faceMenuOpen && (
+                <div className="absolute right-0 mt-2 w-52 z-40 bg-emerald-950 border border-emerald-500/40 rounded-xl shadow-2xl p-1.5 text-xs font-bold">
+                  <div className="p-2 flex items-center gap-3 border-b border-emerald-500/20 mb-1">
+                    <div className="w-12 h-12 rounded-full overflow-hidden border-2 border-emerald-400 bg-emerald-900 shrink-0">
+                      {facePhoto && (
+                        // eslint-disable-next-line @next/next/no-img-element -- data URL
+                        <img src={facePhoto} alt="Your saved face" className="w-full h-full object-cover -scale-x-100" />
+                      )}
+                    </div>
+                    <span className="text-emerald-200 font-semibold leading-snug">Your saved photo</span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setFaceMenuOpen(false);
+                      setFaceScanOpen(true);
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-lg hover:bg-emerald-800 text-white"
+                  >
+                    Take a new photo
+                  </button>
+                  <button onClick={removeFaceLogin} className="w-full text-left px-3 py-2 rounded-lg hover:bg-red-900/60 text-red-200">
+                    Turn off photo login
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Signed-in Farmer & Sign Out */}
           <button
             onClick={onLogout}
@@ -754,6 +861,7 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
           { id: 'dashboard', label: t.nav.dashboard, icon: Layers },
           { id: 'calculator', label: t.nav.calculator, icon: Sliders },
           { id: 'vision', label: t.nav.vision, icon: Video },
+          { id: 'plant', label: t.nav.plant, icon: Leaf },
           { id: 'alerts', label: t.nav.notifications, icon: Bell, badge: notifications.filter((n) => n.status === 'Active Alert').length || undefined },
           { id: 'devices', label: t.nav.devices, icon: Cpu },
           { id: 'ai', label: t.nav.ai, icon: Sparkles },
@@ -1395,6 +1503,11 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
         {activeTab === 'vision' && (
           <LiveVision apiBase={API_BASE} apiFetch={apiFetch} onAlert={handleVisionAlert} />
         )}
+
+        {/* ========================================================
+                 PLANT DOCTOR: PHOTO DIAGNOSIS & GROWING GUIDE
+        ======================================================== */}
+        {activeTab === 'plant' && <PlantDoctor apiBase={API_BASE} apiFetch={apiFetch} language={lang} />}
 
         {/* ========================================================
                    TAB 5: ALERTS & RESOLUTION

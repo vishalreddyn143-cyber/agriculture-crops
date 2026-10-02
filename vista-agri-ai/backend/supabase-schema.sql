@@ -13,3 +13,8 @@ create table if not exists public.farmers (
 alter table public.farmers enable row level security;
 revoke all on table public.farmers from anon, authenticated;
 grant select, insert, update, delete on table public.farmers to service_role;
+
+-- Face sign-in: the farmer's registered face photo (small JPEG data URL) and the
+-- 128-number face descriptor computed from it, which sign-in scans are matched against.
+alter table public.farmers add column if not exists face_descriptor jsonb;
+alter table public.farmers add column if not exists face_photo text;

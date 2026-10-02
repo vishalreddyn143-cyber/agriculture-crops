@@ -5,7 +5,17 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { FarmerAccount, findFarmerByEmail, createFarmer, DuplicateEmailError } from './models/farmerAccounts';
+import {
+  FarmerAccount,
+  findFarmerByEmail,
+  createFarmer,
+  DuplicateEmailError,
+  FaceLoginUnavailableError,
+  setFace,
+  getFacePhoto,
+  FaceRecord,
+  listFaceDescriptors,
+} from './models/farmerAccounts';
 import connectDB from './config/db';
 import { DataStore, createEmptyStore, FarmProtectionPlan, EventItem, NotificationItem } from './models/store';
 
@@ -22,7 +32,8 @@ app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 }));
-app.use(express.json());
+// Plant photos arrive as base64 data URLs (resized to ~1 MB in the browser); Vercel caps bodies at 4.5 MB
+app.use(express.json({ limit: '4mb' }));
 // Render and Vercel sit behind a proxy; trust it so req.ip is the real client IP for rate limiting
 app.set('trust proxy', 1);
 
@@ -176,6 +187,79 @@ app.post('/api/auth/login', authAttemptLimit, async (req, res) => {
   });
 });
 
+/* ------------------------------------------------------------
+   Face sign-in: at setup the browser takes a photo of the farmer
+   and computes its 128-number face descriptor (face-api.js); both
+   are saved. A sign-in scan (after a blink check) is matched
+   against those saved descriptors.
+------------------------------------------------------------ */
+// Match confidence (0-100) from the distance between two face descriptors. A logistic curve
+// centred on face-api's standard same-person boundary (distance 0.6 = 50%) and scaled so that
+// distance 0.40 = 95%: the same face in two different photos usually scores 90-99%.
+const faceConfidence = (distance: number) => Math.round(100 / (1 + Math.exp(14.72 * (distance - 0.6))));
+// Sign-in needs at least this confidence that the two photos show the same face
+const MIN_FACE_CONFIDENCE = 95;
+// The best match must beat the runner-up by this much distance, so two similar faces can't be confused
+const FACE_MATCH_MARGIN = 0.06;
+
+const isFaceDescriptor = (value: unknown): value is number[] =>
+  Array.isArray(value) && value.length === 128 && value.every((n) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < 2);
+
+const faceDistance = (a: number[], b: number[]) => Math.sqrt(a.reduce((sum, v, i) => sum + (v - b[i]) ** 2, 0));
+
+// Registered face photos: a small JPEG data URL (the browser sends about 20-40 KB)
+const FACE_PHOTO_PATTERN = /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/;
+const isFacePhoto = (value: unknown): value is string =>
+  typeof value === 'string' && value.length <= 300_000 && FACE_PHOTO_PATTERN.test(value);
+
+const FACE_UNAVAILABLE_MESSAGE = 'Face sign-in is not set up on the server yet. Please sign in with your email and password.';
+
+app.post('/api/auth/face/login', authAttemptLimit, async (req, res) => {
+  const { descriptor } = req.body;
+  if (!isFaceDescriptor(descriptor)) {
+    return res.status(400).json({ success: false, message: 'No face was captured. Please try again.' });
+  }
+  let candidates;
+  try {
+    candidates = await listFaceDescriptors();
+  } catch (error: any) {
+    if (error instanceof FaceLoginUnavailableError) return res.status(503).json({ success: false, message: FACE_UNAVAILABLE_MESSAGE });
+    console.error(`❌ [VISTA-AUTH] ${error.message}`);
+    return res.status(500).json({ success: false, message: 'Could not sign you in. Please try again.' });
+  }
+  const ranked = candidates
+    .map((c) => ({ account: c.account, distance: faceDistance(descriptor, c.descriptor) }))
+    .sort((a, b) => a.distance - b.distance);
+  const [best, runnerUp] = ranked;
+  if (!best) {
+    return res.status(401).json({ success: false, message: 'No account has face sign-in set up yet. Sign in with your email and password.' });
+  }
+  const similarity = faceConfidence(best.distance);
+  if (similarity < MIN_FACE_CONFIDENCE || (runnerUp && runnerUp.distance - best.distance < FACE_MATCH_MARGIN)) {
+    // The score helps the farmer retake a better photo; no account details are revealed
+    return res.status(401).json({
+      success: false,
+      similarity,
+      message: `Face match was ${similarity}%, but ${MIN_FACE_CONFIDENCE}% is needed. Face the light, look straight at the camera and try again.`,
+    });
+  }
+  // Only the matched farmer's own registered photo is returned, to show beside their live scan
+  let savedPhoto: string | null = null;
+  try {
+    savedPhoto = await getFacePhoto(best.account.id);
+  } catch {
+    // The photo is only for display; sign-in still succeeds without it
+  }
+  return res.status(200).json({
+    success: true,
+    message: `Welcome back, ${best.account.fullName.split(' ')[0]}`,
+    user: publicUser(best.account),
+    token: signToken(best.account),
+    savedPhoto,
+    similarity,
+  });
+});
+
 // Every API route registered after this point requires a signed-in farmer
 app.use('/api', (req, res, next) => {
   const user = userFromRequest(req);
@@ -189,6 +273,57 @@ app.use('/api', (req, res, next) => {
 app.get('/api/auth/me', (req, res) => {
   res.status(200).json({ success: true, user: res.locals.user });
 });
+
+// Registers (PUT) or removes (DELETE) the signed-in farmer's face. Returns a fresh token
+// because the token carries the profile, including whether face sign-in is on.
+const updateFace = async (req: Request, res: Response, face: FaceRecord | null) => {
+  if (res.locals.user.demo) {
+    return res.status(400).json({ success: false, message: 'Face sign-in needs a real account. Create one to use it.' });
+  }
+  try {
+    if (face) {
+      // One face per account: refuse a face that already opens someone else's account
+      const others = (await listFaceDescriptors()).filter((c) => c.account.id !== res.locals.user.id);
+      if (others.some((c) => faceConfidence(faceDistance(face.descriptor, c.descriptor)) >= MIN_FACE_CONFIDENCE)) {
+        return res.status(409).json({ success: false, message: 'This face is already linked to another account.' });
+      }
+    }
+    const account = await setFace(res.locals.user.id, face);
+    if (!account) return res.status(404).json({ success: false, message: 'Account not found. Please sign in again.' });
+    return res.status(200).json({
+      success: true,
+      message: face ? 'Face sign-in is on. Next time, just scan your face to sign in.' : 'Face sign-in removed.',
+      user: publicUser(account),
+      token: signToken(account),
+    });
+  } catch (error: any) {
+    if (error instanceof FaceLoginUnavailableError) return res.status(503).json({ success: false, message: FACE_UNAVAILABLE_MESSAGE });
+    console.error(`❌ [VISTA-AUTH] ${error.message}`);
+    return res.status(500).json({ success: false, message: 'Could not update face sign-in. Please try again.' });
+  }
+};
+
+app.put('/api/auth/face', authAttemptLimit, (req, res) => {
+  const { descriptor, photo } = req.body;
+  if (!isFaceDescriptor(descriptor) || !isFacePhoto(photo)) {
+    return res.status(400).json({ success: false, message: 'No face photo was captured. Please try again.' });
+  }
+  return updateFace(req, res, { descriptor, photo });
+});
+
+// The signed-in farmer's own registered face photo
+app.get('/api/auth/face', async (req, res) => {
+  try {
+    const photo = res.locals.user.demo ? null : await getFacePhoto(res.locals.user.id);
+    return res.status(200).json({ success: true, photo });
+  } catch (error: any) {
+    if (error instanceof FaceLoginUnavailableError) return res.status(503).json({ success: false, message: FACE_UNAVAILABLE_MESSAGE });
+    console.error(`❌ [VISTA-AUTH] ${error.message}`);
+    return res.status(500).json({ success: false, message: 'Could not load your face photo.' });
+  }
+});
+
+app.delete('/api/auth/face', (req, res) => updateFace(req, res, null));
 
 /* ============================================================
                    3. FARMS & FIELDS
@@ -621,7 +756,102 @@ app.post('/api/vision/detections', visionReportLimit, (req, res) => {
 });
 
 /* ============================================================
-             10. ASK VISTA AI (ENGLISH, TELUGU, HINDI)
+        10. PLANT DOCTOR (PHOTO DIAGNOSIS + GROWING GUIDE)
+============================================================ */
+// A Groq model that accepts images; override with GROQ_VISION_MODEL if Groq retires it
+const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b';
+const PLANT_IMAGE_PATTERN = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+
+const PLANT_PROMPT = (language: string) => `You are an expert plant pathologist and agronomist advising Indian farmers.
+Look at the photo and reply with ONLY a JSON object, no other text, in exactly this shape:
+{
+  "isPlant": boolean,                       // false if the photo shows no plant
+  "plantName": string,                      // common name, e.g. "Tomato"
+  "scientificName": string,
+  "identificationConfidence": number,       // 0 to 1
+  "healthStatus": "HEALTHY" | "DISEASED" | "PEST_DAMAGE" | "NUTRIENT_DEFICIENCY" | "WATER_STRESS" | "UNCERTAIN",
+  "healthScore": number,                    // 0 (dying) to 100 (perfectly healthy)
+  "summary": string,                        // 2 short sentences: what the plant is and its condition
+  "diagnosis": {                            // null when healthStatus is HEALTHY
+    "name": string,                         // e.g. "Late blight"
+    "cause": string,                        // pathogen, pest or deficiency, e.g. "Phytophthora infestans (water mould)"
+    "severity": "LOW" | "MEDIUM" | "HIGH",
+    "symptomsSeen": string[],               // what is visible in this photo
+    "spreadRisk": string                    // how it spreads and how fast
+  } | null,
+  "treatment": {                            // null when healthStatus is HEALTHY
+    "immediateActions": string[],
+    "organic": string[],
+    "chemical": string[],                   // product types with typical Indian dose, e.g. "Mancozeb 75% WP at 2.5 g per litre"
+    "prevention": string[]
+  } | null,
+  "growingGuide": {
+    "season": string,                       // best sowing season in India
+    "climate": string,                      // temperature range and humidity
+    "soil": string,                         // type and pH
+    "sunlight": string,
+    "watering": string,
+    "fertilizer": string,                   // NPK schedule
+    "spacing": string,
+    "timeToHarvest": string,
+    "commonProblems": string[]
+  },
+  "tips": string[]                          // 2-4 practical tips
+}
+Rules: Write every text value in ${LANGUAGE_NAMES[language] || 'English'}, but keep the enum values above in English.
+Base the diagnosis on what is actually visible. If the photo is too unclear to judge, use "UNCERTAIN" and say what photo would help.
+Use [] for lists with nothing to add. If isPlant is false, set the other text fields to "" and objects to null.`;
+
+// 10 analyses per farmer per minute, to protect the Groq quota
+const plantAnalyzeLimit = rateLimit(10, 60 * 1000, (req) => req.headers.authorization || req.ip || 'unknown');
+
+app.post('/api/plant/analyze', plantAnalyzeLimit, async (req, res) => {
+  const { image, language = 'en' } = req.body;
+  if (typeof image !== 'string' || !PLANT_IMAGE_PATTERN.test(image)) {
+    return res.status(400).json({ success: false, message: 'Please upload a JPEG, PNG or WebP photo of the plant.' });
+  }
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ success: false, message: 'Plant analysis is not configured on the server (GROQ_API_KEY is missing).' });
+  }
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        temperature: 0.2,
+        max_completion_tokens: 3000,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: PLANT_PROMPT(String(language)) },
+              { type: 'image_url', image_url: { url: image } },
+            ],
+          },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      console.warn(`⚠️ [VISTA-PLANT] Groq request failed: ${response.status} ${await response.text()}`);
+      return res.status(502).json({ success: false, message: 'The plant analysis service is busy. Please try again in a moment.' });
+    }
+    const data: any = await response.json();
+    const text: string = data.choices?.[0]?.message?.content || '';
+    // Some models wrap JSON in prose or code fences; take the outermost object
+    const analysis = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    return res.status(200).json({ success: true, model: GROQ_VISION_MODEL, analysis });
+  } catch (error: any) {
+    console.warn(`⚠️ [VISTA-PLANT] Analysis error: ${error.message}`);
+    return res.status(502).json({ success: false, message: 'Could not analyse this photo. Please try again with a clearer picture.' });
+  }
+});
+
+/* ============================================================
+             11. ASK VISTA AI (ENGLISH, TELUGU, HINDI)
 ============================================================ */
 const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 const LANGUAGE_NAMES: Record<string, string> = { en: 'English', te: 'Telugu', hi: 'Hindi' };

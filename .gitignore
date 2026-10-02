@@ -38,3 +38,7 @@ Thumbs.db
 # TypeScript build info
 *.tsbuildinfo
 next-env.d.ts
+
+# Local development account store (password hashes and photos)
+.data/
+**/.data/

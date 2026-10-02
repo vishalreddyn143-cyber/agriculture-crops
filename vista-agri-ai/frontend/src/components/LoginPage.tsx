@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Mail, Lock, User, Phone, LogIn, UserPlus, Loader2, Sprout } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { Mail, Lock, User, Phone, LogIn, UserPlus, Loader2, Sprout, ScanFace } from 'lucide-react';
 import { MaizeCornLogo } from '@/components/MaizeCornLogo';
+import { FaceScanModal, FaceCaptureResult } from '@/components/FaceScanModal';
 
 export interface AuthUser {
   id: string;
@@ -11,6 +12,7 @@ export interface AuthUser {
   phone?: string;
   preferredLanguage?: string;
   demo?: boolean;
+  hasFaceLogin?: boolean;
 }
 
 interface LoginPageProps {
@@ -22,6 +24,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ apiBase, onLogin }) => {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [form, setForm] = useState({ fullName: '', email: '', phone: '', password: '' });
   const [error, setError] = useState<string | null>(null);
+  const [faceScanOpen, setFaceScanOpen] = useState(false);
+  // Session from a matched face, applied once the scanner has shown the comparison
+  const faceSessionRef = useRef<{ user: AuthUser; token: string } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const update = (field: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -47,6 +52,28 @@ export const LoginPage: React.FC<LoginPageProps> = ({ apiBase, onLogin }) => {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  // Face sign-in: only the live scan's descriptor is sent; the server matches it against saved face photos
+  const signInWithFace = async ({ descriptor }: { descriptor: number[] }): Promise<FaceCaptureResult> => {
+    try {
+      const res = await fetch(`${apiBase}/auth/face/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ descriptor }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) return { error: data.message || 'Face sign-in failed. Please try again.' };
+      faceSessionRef.current = { user: data.user, token: data.token };
+      return { savedPhoto: data.savedPhoto, similarity: data.similarity };
+    } catch {
+      return { error: 'Cannot reach the VISTA server. Please check your connection.' };
+    }
+  };
+
+  const finishFaceSignIn = () => {
+    const session = faceSessionRef.current;
+    if (session) onLogin(session.user, session.token);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -181,6 +208,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({ apiBase, onLogin }) => {
 
         <button
           type="button"
+          onClick={() => setFaceScanOpen(true)}
+          disabled={isSubmitting}
+          className="w-full mb-3 bg-white hover:bg-emerald-50 text-emerald-950 font-black py-3 rounded-xl shadow-lg transition disabled:opacity-60 flex items-center justify-center gap-2"
+        >
+          <ScanFace className="w-4 h-4" />
+          <span>Sign in with Photo</span>
+        </button>
+
+        <button
+          type="button"
           onClick={() => submitAuth('demo', {})}
           disabled={isSubmitting}
           className="w-full bg-transparent hover:bg-emerald-900/60 text-white font-bold py-3 rounded-xl border border-emerald-400/50 transition disabled:opacity-60 flex items-center justify-center gap-2"
@@ -189,6 +226,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({ apiBase, onLogin }) => {
           <span>Try the Demo Farm</span>
         </button>
       </div>
+
+      {faceScanOpen && <FaceScanModal mode="login" onCapture={signInWithFace} onSuccess={finishFaceSignIn} onClose={() => setFaceScanOpen(false)} />}
     </div>
   );
 };
