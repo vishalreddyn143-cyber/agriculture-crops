@@ -533,7 +533,95 @@ app.post('/api/demo/trigger-wild-boar', (req, res) => {
 });
 
 /* ============================================================
-             9. ASK VISTA AI (ENGLISH, TELUGU, HINDI)
+         9. LIVE VISION DETECTIONS (YOLO IN THE BROWSER)
+============================================================ */
+// The Live Vision tab runs YOLO11n on the farmer's camera in the browser and
+// reports each confirmed sighting here, which turns it into an event and an alert.
+const VISION_THREATS: Record<string, { label: string; eventType: EventItem['eventType']; severity: EventItem['severity']; action: string }> = {
+  elephant: { label: 'Elephant', eventType: 'ANIMAL', severity: 'CRITICAL', action: 'Keep a safe distance and alert the forest department. Do not approach the animal.' },
+  bear: { label: 'Bear', eventType: 'ANIMAL', severity: 'CRITICAL', action: 'Stay indoors and alert the forest department. Do not approach the animal.' },
+  cow: { label: 'Cattle', eventType: 'ANIMAL', severity: 'HIGH', action: 'Stray cattle can graze the crop quickly. Guide them out and check the gate.' },
+  horse: { label: 'Horse', eventType: 'ANIMAL', severity: 'HIGH', action: 'Guide the animal out of the field and check the boundary for gaps.' },
+  sheep: { label: 'Sheep / Goat', eventType: 'ANIMAL', severity: 'HIGH', action: 'A grazing herd can strip young plants. Move them out and close the gate.' },
+  dog: { label: 'Dog', eventType: 'ANIMAL', severity: 'MEDIUM', action: 'Check whether it is a stray or a wild canine moving through the field.' },
+  cat: { label: 'Cat', eventType: 'ANIMAL', severity: 'LOW', action: 'Usually harmless to crops. No action needed unless it keeps returning.' },
+  bird: { label: 'Bird', eventType: 'ANIMAL', severity: 'MEDIUM', action: 'Flocks can damage grain and fruiting crops. Use a scare device if birds keep returning.' },
+  person: { label: 'Person', eventType: 'INTRUDER', severity: 'MEDIUM', action: 'Someone is in the field. Confirm whether they are a worker or an intruder.' },
+};
+
+// 30 detection reports per farmer per minute (the browser already waits between repeat alerts)
+const visionReportLimit = rateLimit(30, 60 * 1000, (req) => req.headers.authorization || req.ip || 'unknown');
+
+app.post('/api/vision/detections', visionReportLimit, (req, res) => {
+  const { className, confidence, trackId } = req.body;
+  const threat = VISION_THREATS[String(className)];
+  const score = Number(confidence);
+  if (!threat || !(score > 0 && score <= 1)) {
+    return res.status(400).json({ success: false, message: 'Unknown object class or invalid confidence.' });
+  }
+
+  const store = db(res);
+  const siren = threat.severity === 'LOW' ? undefined : store.devices.find((d) => d.type === 'SIREN' && d.status !== 'OFFLINE');
+  if (siren) {
+    siren.status = 'TRIGGERED';
+    setTimeout(() => {
+      siren.status = 'ONLINE';
+    }, 10000);
+  }
+
+  const id = `evt-${Date.now()}`;
+  const confidencePct = Math.round(score * 100);
+  const track = trackId ? `#${String(trackId).replace(/[^0-9]/g, '').slice(0, 6)}` : undefined;
+  // Farmers are in India, so show times in IST rather than the server's UTC
+  const timestamp = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
+  const event: EventItem = {
+    id,
+    eventType: threat.eventType,
+    objectType: threat.label,
+    trackId: track,
+    farmId: store.farms[0]?.id || 'farm-01',
+    fieldId: store.fields[0]?.id || 'field-01',
+    timestamp,
+    location: 'Live camera feed',
+    zone: 'Camera view',
+    confidence: score,
+    severity: threat.severity,
+    observations: `${threat.label} detected by YOLO11n with ${confidencePct}% confidence${track ? ` (track ${track})` : ''}.`,
+    possibleCause: threat.eventType === 'INTRUDER' ? 'Person in the field' : 'Animal entering the field',
+    recommendedAction: threat.action,
+    status: 'DETECTED',
+    evidence: { imageUrl: '' },
+    sirenActivated: Boolean(siren),
+    sirenId: siren?.id,
+  };
+  store.events.unshift(event);
+
+  const notification: NotificationItem = {
+    id: `notif-${Date.now()}`,
+    eventId: id,
+    title: `${threat.eventType === 'INTRUDER' ? '🚶' : '🐾'} ${threat.label.toUpperCase()} DETECTED`,
+    problem: `${threat.label} seen on the live camera`,
+    objectType: threat.label,
+    location: event.location,
+    severity: threat.severity,
+    timestamp,
+    evidenceSummary: `${event.observations}${siren ? ` ${siren.name} sounded.` : ''}`,
+    recommendedAction: threat.action,
+    devicesTriggered: siren ? [siren.name, 'Web Alert'] : ['Web Alert'],
+    read: false,
+    channels: { web: true, mobile: false, siren: Boolean(siren), sms: false },
+    source: 'camera',
+  };
+  store.notifications.unshift(notification);
+  // Keep the in-memory history bounded for long camera sessions
+  store.events.splice(200);
+  store.notifications.splice(200);
+
+  res.status(201).json({ success: true, event, notification, sirenTriggered: Boolean(siren) });
+});
+
+/* ============================================================
+             10. ASK VISTA AI (ENGLISH, TELUGU, HINDI)
 ============================================================ */
 const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 const LANGUAGE_NAMES: Record<string, string> = { en: 'English', te: 'Telugu', hi: 'Hindi' };

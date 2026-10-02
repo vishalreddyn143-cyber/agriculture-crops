@@ -32,6 +32,7 @@ import {
 import { MaizeCornLogo } from '@/components/MaizeCornLogo';
 import { translations, Language } from '@/lib/translations';
 import { LoginPage, AuthUser } from '@/components/LoginPage';
+import { LiveVision, VisionAlertResult } from '@/components/LiveVision';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 const API_BASE = `${BACKEND_URL}/api`;
@@ -337,7 +338,7 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
               id: n.id,
               eventId: n.eventId,
               title: n.title,
-              crop: n.objectType === 'Wild Boar' ? 'Cotton & Maize Zone' : 'East Border Plot',
+              crop: n.source === 'camera' ? 'Live Vision camera' : n.objectType === 'Wild Boar' ? 'Cotton & Maize Zone' : 'East Border Plot',
               location: n.location,
               time: n.timestamp,
               evidence: n.evidenceSummary || n.problem,
@@ -446,6 +447,20 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
       showToast('🐗 Wild Boar detected -> Gentle Siren chime active -> Push Alert sent!');
       fetchBackendData();
     }, 1200);
+  };
+
+  // A confirmed sighting from the Live Vision camera: chime, tell the farmer, refresh alerts
+  const handleVisionAlert = ({ className, confidence, sirenTriggered, reported }: VisionAlertResult) => {
+    playGentleAlertSound();
+    setFieldSafe(false);
+    if (sirenTriggered) setSirensActive(true);
+    const pct = Math.round(confidence * 100);
+    showToast(
+      reported
+        ? `🚨 ${className} detected (${pct}%). Alert saved${sirenTriggered ? ' and siren sounded' : ''}.`
+        : `🚨 ${className} detected (${pct}%). Could not reach the server, so the alert was not saved.`,
+    );
+    fetchBackendData();
   };
 
   // Ask VISTA AI
@@ -1376,69 +1391,8 @@ function VistaAgriApp({ authUser, apiFetch, onLogout }: VistaAgriAppProps) {
         {/* ========================================================
                  TAB 4: LIVE VISION & OBJECT TRACKING
         ======================================================== */}
-        {activeTab === 'vision' && !isDemo && (
-          <EmptyState
-            icon={<Video className="w-8 h-8 text-emerald-400" />}
-            title="No cameras connected"
-            text="Once you connect a field camera, its live feed and AI animal detection will appear here."
-            actionLabel="View Devices"
-            onAction={() => setActiveTab('devices')}
-          />
-        )}
-        {activeTab === 'vision' && isDemo && (
-          <div className="space-y-6">
-            <div className="bg-emerald-950/80 border border-emerald-500/30 rounded-3xl p-6 shadow-2xl backdrop-blur-md">
-              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-emerald-500/20 pb-4 mb-4">
-                <div>
-                  <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                    <Video className="w-5 h-5 text-emerald-400" />
-                    Optical AI Inference - Camera #2 (North-East Border)
-                  </h2>
-                  <p className="text-xs text-emerald-200/80 mt-0.5">
-                    Real-time YOLO Animal Detection + BoT-SORT Multi-Object Tracking + Geofence Guard
-                  </p>
-                </div>
-                <span className="bg-white text-emerald-950 font-black px-3 py-1 rounded-full text-xs">
-                  LIVE FEED (30 FPS)
-                </span>
-              </div>
-
-              {/* Simulated Camera Feed */}
-              <div className="relative w-full h-[400px] bg-emerald-950/90 rounded-2xl overflow-hidden border border-emerald-500/40 flex items-center justify-center">
-                {/* Crop Field Background */}
-                <div
-                  className="absolute inset-0 bg-cover bg-center opacity-40"
-                  style={{ backgroundImage: "url('/agriculture/farmer_field_bg.jpg')" }}
-                />
-
-                {/* Geofence Boundary */}
-                <div className="absolute inset-10 border-2 border-dashed border-white/80 rounded-xl flex items-start justify-end p-2 pointer-events-none">
-                  <span className="text-[10px] bg-white text-emerald-950 font-black px-2.5 py-0.5 rounded-full shadow">
-                    PROTECTED CANOPY BOUNDARY
-                  </span>
-                </div>
-
-                {/* Bounding Box for Wild Boar */}
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-56 h-44 border-2 border-white rounded-xl bg-white/10 flex flex-col justify-between p-2 shadow-2xl backdrop-blur-xs">
-                  <div className="flex items-center justify-between text-[11px] font-black bg-white text-emerald-950 px-2 py-0.5 rounded-md">
-                    <span>🐗 Wild Boar</span>
-                    <span>94% Confidence</span>
-                  </div>
-
-                  <div className="flex flex-col gap-0.5 text-[10px] bg-emerald-950/90 text-white p-2 rounded-lg border border-emerald-500/50">
-                    <span className="font-bold text-emerald-300">Track ID: #17</span>
-                    <span>Speed: ~4.2 km/h</span>
-                    <span>Re-ID Status: Continuous (Post-occlusion)</span>
-                    <span className="text-emerald-400 font-bold">Action: Siren #2 Triggered</span>
-                  </div>
-                </div>
-
-                <div className="absolute bottom-3 left-3 text-[11px] text-white font-mono bg-emerald-950/80 px-3 py-1 rounded-lg border border-emerald-500/40">
-                  CAM_02_NE_BORDER | 1920x1080 @ 30FPS | COOLDOWN: 180s
-                </div>
-              </div>
-            </div>
-          </div>
+        {activeTab === 'vision' && (
+          <LiveVision apiBase={API_BASE} apiFetch={apiFetch} onAlert={handleVisionAlert} />
         )}
 
         {/* ========================================================
