@@ -18,6 +18,14 @@ import {
   listFaceDescriptors,
 } from './models/farmerAccounts';
 import connectDB from './config/db';
+import {
+  CameraInput,
+  CameraStorageUnavailableError,
+  listCameras,
+  createCamera,
+  updateCamera,
+  deleteCamera,
+} from './models/cameras';
 import { DataStore, createEmptyStore, FarmProtectionPlan, EventItem, NotificationItem } from './models/store';
 
 dotenv.config();
@@ -530,6 +538,116 @@ app.get('/api/devices', (req, res) => {
   res.status(200).json({ success: true, devices: db(res).devices });
 });
 
+/* ------------------------------------------------------------
+   Connected cameras (real accounts): saved per farmer and shown
+   in Cameras & Sirens and Live Vision.
+------------------------------------------------------------ */
+const MAX_CAMERAS = 20;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CAMERA_STORAGE_MESSAGE = 'Camera storage is not set up on the server yet (run supabase-schema.sql in Supabase).';
+
+// Checks a camera form and returns the cleaned values, or a message saying what to fix
+const parseCameraInput = (body: any): { input: CameraInput } | { error: string } => {
+  const name = String(body.name || '').trim();
+  const location = String(body.location || '').trim();
+  const type = body.type;
+  if (!name || name.length > 60) return { error: 'Give the camera a name (up to 60 characters).' };
+  if (location.length > 80) return { error: 'Keep the location under 80 characters.' };
+  if (!['device', 'hls', 'mjpeg'].includes(type)) return { error: 'Choose how the camera connects.' };
+  const aiAlerts = body.aiAlerts !== false;
+
+  if (type === 'device') {
+    const deviceId = String(body.deviceId || '').slice(0, 300) || null;
+    const deviceLabel = String(body.deviceLabel || '').trim().slice(0, 120) || null;
+    return { input: { name, location, type, streamUrl: null, deviceId, deviceLabel, aiAlerts } };
+  }
+
+  let url: URL;
+  try {
+    url = new URL(String(body.streamUrl || '').trim());
+  } catch {
+    return { error: 'Enter the full stream link, starting with https://' };
+  }
+  // A secure (https) site may only load https streams, or http from this same computer
+  const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLocal)) {
+    return {
+      error:
+        url.protocol === 'rtsp:'
+          ? 'Browsers cannot play rtsp:// links directly. Convert the camera to an https:// HLS or MJPEG link first (see "How do I get a stream link?").'
+          : 'The stream link must start with https:// (browsers block http streams on secure websites).',
+    };
+  }
+  if (url.username || url.password) {
+    return { error: 'Do not put a username or password in the link. Browsers block them; use a link with an access token instead.' };
+  }
+  if (url.href.length > 500) return { error: 'The stream link is too long.' };
+  return { input: { name, location, type, streamUrl: url.href, deviceId: null, deviceLabel: null, aiAlerts } };
+};
+
+const cameraError = (res: Response, error: any) => {
+  if (error instanceof CameraStorageUnavailableError) return res.status(503).json({ success: false, message: CAMERA_STORAGE_MESSAGE });
+  console.error(`❌ [VISTA-CAMERAS] ${error.message}`);
+  return res.status(500).json({ success: false, message: 'Could not update your cameras. Please try again.' });
+};
+
+// The demo farm keeps its sample devices; connecting cameras needs a real account
+const realAccountOnly = (res: Response) => {
+  if (!res.locals.user.demo) return false;
+  res.status(400).json({ success: false, message: 'Connecting cameras needs a real account. Create one to add your cameras.' });
+  return true;
+};
+
+app.get('/api/cameras', async (req, res) => {
+  if (res.locals.user.demo) return res.status(200).json({ success: true, cameras: [] });
+  try {
+    return res.status(200).json({ success: true, cameras: await listCameras(res.locals.user.id) });
+  } catch (error) {
+    return cameraError(res, error);
+  }
+});
+
+app.post('/api/cameras', async (req, res) => {
+  if (realAccountOnly(res)) return;
+  const parsed = parseCameraInput(req.body);
+  if ('error' in parsed) return res.status(400).json({ success: false, message: parsed.error });
+  try {
+    if ((await listCameras(res.locals.user.id)).length >= MAX_CAMERAS) {
+      return res.status(400).json({ success: false, message: `You can connect up to ${MAX_CAMERAS} cameras.` });
+    }
+    const camera = await createCamera(res.locals.user.id, parsed.input);
+    return res.status(201).json({ success: true, message: `${camera.name} connected.`, camera });
+  } catch (error) {
+    return cameraError(res, error);
+  }
+});
+
+app.put('/api/cameras/:id', async (req, res) => {
+  if (realAccountOnly(res)) return;
+  const parsed = parseCameraInput(req.body);
+  if ('error' in parsed) return res.status(400).json({ success: false, message: parsed.error });
+  if (!UUID_PATTERN.test(req.params.id)) return res.status(404).json({ success: false, message: 'Camera not found.' });
+  try {
+    const camera = await updateCamera(res.locals.user.id, req.params.id, parsed.input);
+    if (!camera) return res.status(404).json({ success: false, message: 'Camera not found.' });
+    return res.status(200).json({ success: true, message: `${camera.name} updated.`, camera });
+  } catch (error) {
+    return cameraError(res, error);
+  }
+});
+
+app.delete('/api/cameras/:id', async (req, res) => {
+  if (realAccountOnly(res)) return;
+  if (!UUID_PATTERN.test(req.params.id)) return res.status(404).json({ success: false, message: 'Camera not found.' });
+  try {
+    const removed = await deleteCamera(res.locals.user.id, req.params.id);
+    if (!removed) return res.status(404).json({ success: false, message: 'Camera not found.' });
+    return res.status(200).json({ success: true, message: 'Camera removed.' });
+  } catch (error) {
+    return cameraError(res, error);
+  }
+});
+
 app.post('/api/sirens/:id/test', (req, res) => {
   const { id } = req.params;
   const siren = db(res).devices.find((d) => d.id === id);
@@ -708,6 +826,9 @@ const visionReportLimit = rateLimit(30, 60 * 1000, (req) => req.headers.authoriz
 
 app.post('/api/vision/detections', visionReportLimit, (req, res) => {
   const { className, confidence, trackId } = req.body;
+  // Which connected camera saw it (optional; plain strings shown in the alert)
+  const cameraName = typeof req.body.cameraName === 'string' ? req.body.cameraName.trim().slice(0, 60) : '';
+  const cameraLocation = typeof req.body.location === 'string' ? req.body.location.trim().slice(0, 80) : '';
   const threat = VISION_THREATS[String(className)];
   const score = Number(confidence);
   if (!threat || !(score > 0 && score <= 1)) {
@@ -736,8 +857,8 @@ app.post('/api/vision/detections', visionReportLimit, (req, res) => {
     farmId: store.farms[0]?.id || 'farm-01',
     fieldId: store.fields[0]?.id || 'field-01',
     timestamp,
-    location: 'Live camera feed',
-    zone: 'Camera view',
+    location: cameraLocation || cameraName || 'Live camera feed',
+    zone: cameraName || 'Camera view',
     confidence: score,
     severity: threat.severity,
     observations: `${threat.label} detected by YOLO11n with ${confidencePct}% confidence${track ? ` (track ${track})` : ''}.`,
@@ -754,7 +875,7 @@ app.post('/api/vision/detections', visionReportLimit, (req, res) => {
     id: `notif-${Date.now()}`,
     eventId: id,
     title: `${threat.eventType === 'INTRUDER' ? '🚶' : '🐾'} ${threat.label.toUpperCase()} DETECTED`,
-    problem: `${threat.label} seen on the live camera`,
+    problem: `${threat.label} seen on ${cameraName || 'the live camera'}`,
     objectType: threat.label,
     location: event.location,
     severity: threat.severity,

@@ -2,7 +2,8 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import type { InferenceSession, Tensor } from 'onnxruntime-web';
-import { Camera, CameraOff, ImageUp, Loader2, Video, ShieldAlert, Cpu } from 'lucide-react';
+import { Camera, CameraOff, ImageUp, Loader2, Video, ShieldAlert, Cpu, Cctv } from 'lucide-react';
+import { CameraFeed, ConnectedCamera } from '@/components/CameraFeed';
 
 // YOLO11n (COCO, 80 classes) exported to ONNX: input [1,3,640,640], output [1,84,8400]
 const MODEL_URL = '/models/yolo11n.onnx';
@@ -49,7 +50,7 @@ interface Track {
   alerted: boolean;
 }
 
-type Source = 'none' | 'camera' | 'image' | 'video';
+type Source = 'none' | 'camera' | 'image' | 'video' | 'connected';
 type ModelStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface VisionAlertResult {
@@ -104,11 +105,20 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
   const [minConfidence, setMinConfidence] = useState(0.4);
   const [farmObjectsOnly, setFarmObjectsOnly] = useState(true);
   const [alertsSent, setAlertsSent] = useState(0);
+  // The farmer's connected cameras with AI alerts on (real accounts), and the one being watched
+  const [connectedCameras, setConnectedCameras] = useState<ConnectedCamera[]>([]);
+  const [activeCamera, setActiveCamera] = useState<ConnectedCamera | null>(null);
+  const [streamNote, setStreamNote] = useState('');
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const videoOverlayRef = useRef<HTMLCanvasElement>(null);
   const imageOverlayRef = useRef<HTMLCanvasElement>(null);
+  const streamOverlayRef = useRef<HTMLCanvasElement>(null);
+  // The picture element of the connected camera being analysed
+  const streamElRef = useRef<HTMLVideoElement | HTMLImageElement | null>(null);
+  // Camera name and location sent with alerts
+  const alertSourceRef = useRef<{ cameraName?: string; location?: string }>({});
   const prepCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const loopIdRef = useRef(0);
@@ -122,6 +132,19 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
     settingsRef.current = { minConfidence, farmObjectsOnly };
     onAlertRef.current = onAlert;
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch(`${apiBase}/cameras`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled && data.success) setConnectedCameras(data.cameras.filter((c: ConnectedCamera) => c.aiAlerts));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, apiFetch]);
 
   const ensureModel = async () => {
     setModelStatus('loading');
@@ -146,6 +169,8 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
       videoRef.current.removeAttribute('src');
     }
     tracksRef.current = [];
+    streamElRef.current = null;
+    alertSourceRef.current = {};
   };
 
   // Stop the camera and loop when leaving the tab
@@ -165,6 +190,8 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
       return null;
     });
     setSource(next);
+    setActiveCamera(null);
+    setStreamNote('');
   };
 
   // Letterbox the frame into 640x640 and run YOLO; returns boxes in source pixels
@@ -294,7 +321,7 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
       const res = await apiFetch(`${apiBase}/vision/detections`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ className, confidence: Number(score.toFixed(3)), trackId }),
+        body: JSON.stringify({ className, confidence: Number(score.toFixed(3)), trackId, ...alertSourceRef.current }),
       });
       if (res.ok) {
         reported = true;
@@ -334,14 +361,32 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
     }
   };
 
-  // Runs detection on the playing video until the source changes
-  const runVideoLoop = (loaded: { ort: typeof import('onnxruntime-web'); session: InferenceSession }) => {
+  // Runs detection on a playing video (or a live MJPEG image) until the source changes
+  const runVideoLoop = (
+    loaded: { ort: typeof import('onnxruntime-web'); session: InferenceSession },
+    getElement: () => HTMLVideoElement | HTMLImageElement | null = () => videoRef.current,
+    overlay: () => HTMLCanvasElement | null = () => videoOverlayRef.current,
+  ) => {
     const loopId = ++loopIdRef.current;
     const step = async () => {
-      const video = videoRef.current;
-      if (loopId !== loopIdRef.current || !video) return;
-      if (video.readyState >= 2 && !video.paused && video.videoWidth) {
-        const dets = await detect(loaded, video, video.videoWidth, video.videoHeight);
+      const el = getElement();
+      if (loopId !== loopIdRef.current || !el) return;
+      const isVideo = el instanceof HTMLVideoElement;
+      const width = isVideo ? el.videoWidth : el.naturalWidth;
+      const height = isVideo ? el.videoHeight : el.naturalHeight;
+      const ready = isVideo ? el.readyState >= 2 && !el.paused : el.complete;
+      if (ready && width) {
+        let dets: Detection[];
+        try {
+          dets = await detect(loaded, el, width, height);
+        } catch (err) {
+          // A stream without CORS permission can be shown but not read by the page
+          if (err instanceof DOMException && err.name === 'SecurityError') {
+            setStreamNote('View only: this stream does not allow AI detection (the stream server must allow CORS).');
+            return;
+          }
+          throw err;
+        }
         if (loopId !== loopIdRef.current) return;
         const tracks = updateTracks(dets);
         for (const t of tracks) {
@@ -350,7 +395,7 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
             reportSighting(t.classId, t.box.score, t.id);
           }
         }
-        draw(videoOverlayRef.current, dets, video.videoWidth, video.videoHeight);
+        draw(overlay(), dets, width, height);
         setDetections(dets);
       }
       requestAnimationFrame(step);
@@ -380,6 +425,28 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
           : `Could not open the camera: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  };
+
+  // Watch a connected camera; detection starts once its picture arrives
+  const watchConnectedCamera = (cameraId: string) => {
+    const camera = connectedCameras.find((c) => c.id === cameraId);
+    resetView(camera ? 'connected' : 'none');
+    if (!camera) return;
+    setActiveCamera(camera);
+    alertSourceRef.current = { cameraName: camera.name, location: camera.location };
+    ensureModel();
+  };
+
+  const onConnectedFrame = async (el: HTMLVideoElement | HTMLImageElement, analysable: boolean) => {
+    streamElRef.current = el;
+    if (!analysable) {
+      setStreamNote('View only: this stream does not allow AI detection (the stream server must allow CORS).');
+      return;
+    }
+    const loaded = await loadModel().catch(() => null);
+    if (!loaded || streamElRef.current !== el) return;
+    setModelStatus('ready');
+    runVideoLoop(loaded, () => streamElRef.current, () => streamOverlayRef.current);
   };
 
   const handleFile = async (file: File) => {
@@ -433,6 +500,27 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            {connectedCameras.length > 0 && (
+              <label className="flex items-center gap-2 bg-emerald-900/60 border border-emerald-500/40 rounded-xl px-3 py-1.5 text-xs font-bold text-white">
+                <Cctv className="w-4 h-4 text-emerald-300" />
+                <select
+                  value={activeCamera?.id || ''}
+                  onChange={(e) => watchConnectedCamera(e.target.value)}
+                  className="bg-transparent focus:outline-none text-white"
+                  aria-label="Watch a connected camera"
+                >
+                  <option value="" className="text-emerald-950">
+                    My cameras…
+                  </option>
+                  {connectedCameras.map((c) => (
+                    <option key={c.id} value={c.id} className="text-emerald-950">
+                      {c.name}
+                      {c.location ? ` (${c.location})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             {source === 'camera' ? (
               <button
                 onClick={() => resetView('none')}
@@ -470,6 +558,24 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
               <video ref={videoRef} muted playsInline className="block w-full h-auto" />
               <canvas ref={videoOverlayRef} className="absolute inset-0 w-full h-full pointer-events-none" />
             </div>
+            {source === 'connected' && activeCamera && (
+              <div className="relative w-full">
+                <CameraFeed
+                  key={activeCamera.id}
+                  source={activeCamera}
+                  onElement={onConnectedFrame}
+                  overlay={<canvas ref={streamOverlayRef} className="absolute inset-0 w-full h-full pointer-events-none" />}
+                />
+                <span className="absolute top-3 right-3 bg-black/70 text-white font-bold px-2.5 py-0.5 rounded-full text-[10px]">
+                  {activeCamera.name}
+                </span>
+                {streamNote && (
+                  <span className="absolute bottom-3 left-3 right-3 bg-black/75 text-amber-100 font-bold px-3 py-1.5 rounded-lg text-[11px]">
+                    {streamNote}
+                  </span>
+                )}
+              </div>
+            )}
             <div className={`relative w-full ${source === 'image' ? '' : 'hidden'}`}>
               {/* eslint-disable-next-line @next/next/no-img-element -- local blob preview */}
               <img ref={imageRef} src={imageUrl || undefined} alt="Uploaded field" className="block w-full h-auto" />
@@ -481,7 +587,7 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
                 <Camera className="w-10 h-10 text-emerald-400 mx-auto" />
                 <p className="text-sm font-bold text-white">No feed running</p>
                 <p className="text-xs text-emerald-200/80 max-w-sm">
-                  Start your phone or laptop camera, or upload a photo of cattle, goats, dogs, birds or people to test detection.
+                  Start your phone or laptop camera, pick one of your connected cameras, or upload a photo of cattle, goats, dogs, birds or people to test detection.
                 </p>
               </div>
             )}
@@ -491,7 +597,7 @@ export function LiveVision({ apiBase, apiFetch, onAlert }: LiveVisionProps) {
                 Loading the detection model (about 11 MB, first time only)…
               </div>
             )}
-            {(source === 'camera' || source === 'video') && (
+            {(source === 'camera' || source === 'video' || source === 'connected') && (
               <span className="absolute top-3 left-3 bg-red-600 text-white font-black px-2.5 py-0.5 rounded-full text-[10px] animate-pulse">
                 ● LIVE
               </span>

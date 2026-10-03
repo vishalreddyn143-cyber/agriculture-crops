@@ -36,6 +36,7 @@ import { translations, Language } from '@/lib/translations';
 import { LoginPage, AuthUser } from '@/components/LoginPage';
 import { LiveVision, VisionAlertResult } from '@/components/LiveVision';
 import { PlantDoctor } from '@/components/PlantDoctor';
+import { CameraManager } from '@/components/CameraManager';
 import { FaceScanModal, FaceCaptureResult } from '@/components/FaceScanModal';
 
 // Trailing slashes would produce `//api/...` URLs, which Vercel redirects and browsers then block
@@ -1602,13 +1603,7 @@ function VistaAgriApp({ authUser, apiFetch, onLogout, onSessionUpdate }: VistaAg
                  TAB 6: DEVICES & HARDWARE
         ======================================================== */}
         {activeTab === 'devices' && !isDemo && (
-          <EmptyState
-            icon={<Cpu className="w-8 h-8 text-emerald-400" />}
-            title="No devices connected yet"
-            text="Use the Smart Farm Planner to work out how many cameras and sirens your field needs. Connected devices will be listed here."
-            actionLabel="Open Smart Farm Planner"
-            onAction={() => setActiveTab('calculator')}
-          />
+          <CameraManager apiBase={API_BASE} apiFetch={apiFetch} onOpenLiveVision={() => setActiveTab('vision')} />
         )}
         {activeTab === 'devices' && isDemo && (
           <div className="space-y-6">

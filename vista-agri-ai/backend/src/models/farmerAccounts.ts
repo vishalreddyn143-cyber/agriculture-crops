@@ -25,7 +25,7 @@ export class FaceLoginUnavailableError extends Error {}
 // SUPABASE_SERVICE_ROLE_KEY are set; otherwise in memory (local development).
 // Created on first use, because .env is loaded after this module is imported.
 let supabase: SupabaseClient | null | undefined;
-const getSupabase = (): SupabaseClient | null => {
+export const getSupabase = (): SupabaseClient | null => {
   if (supabase === undefined) {
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
