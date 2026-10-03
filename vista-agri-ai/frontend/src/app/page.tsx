@@ -37,6 +37,7 @@ import { LoginPage, AuthUser } from '@/components/LoginPage';
 import { LiveVision, VisionAlertResult } from '@/components/LiveVision';
 import { PlantDoctor } from '@/components/PlantDoctor';
 import { CameraManager } from '@/components/CameraManager';
+import { DeviceStream } from '@/components/DeviceStream';
 import { FaceScanModal, FaceCaptureResult } from '@/components/FaceScanModal';
 
 // Trailing slashes would produce `//api/...` URLs, which Vercel redirects and browsers then block
@@ -116,7 +117,7 @@ function VistaAgriApp({ authUser, apiFetch, onLogout, onSessionUpdate }: VistaAg
   const isDemo = Boolean(authUser.demo);
 
   const [lang, setLang] = useState<Language>('en');
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'calculator' | 'fieldwork' | 'vision' | 'plant' | 'alerts' | 'devices' | 'ai'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'calculator' | 'fieldwork' | 'vision' | 'live' | 'plant' | 'alerts' | 'devices' | 'ai'>('dashboard');
   const [faceScanOpen, setFaceScanOpen] = useState(false);
   const [faceMenuOpen, setFaceMenuOpen] = useState(false);
   // The farmer's saved face photo, loaded when the face login menu opens
@@ -862,6 +863,7 @@ function VistaAgriApp({ authUser, apiFetch, onLogout, onSessionUpdate }: VistaAg
           { id: 'dashboard', label: t.nav.dashboard, icon: Layers },
           { id: 'calculator', label: t.nav.calculator, icon: Sliders },
           { id: 'vision', label: t.nav.vision, icon: Video },
+          { id: 'live', label: t.nav.live, icon: Radio },
           { id: 'plant', label: t.nav.plant, icon: Leaf },
           { id: 'alerts', label: t.nav.notifications, icon: Bell, badge: notifications.filter((n) => n.status === 'Active Alert').length || undefined },
           { id: 'devices', label: t.nav.devices, icon: Cpu },
@@ -1508,6 +1510,29 @@ function VistaAgriApp({ authUser, apiFetch, onLogout, onSessionUpdate }: VistaAg
         {/* ========================================================
                  PLANT DOCTOR: PHOTO DIAGNOSIS & GROWING GUIDE
         ======================================================== */}
+        {/* ========================================================
+                 DEVICE LIVE STREAM: PHONE-TO-LAPTOP CAMERA
+        ======================================================== */}
+        {activeTab === 'live' && !isDemo && (
+          <DeviceStream
+            apiBase={API_BASE}
+            apiFetch={apiFetch}
+            onAlert={(message) => {
+              playGentleAlertSound();
+              setFieldSafe(false);
+              showToast(message);
+              fetchBackendData();
+            }}
+          />
+        )}
+        {activeTab === 'live' && isDemo && (
+          <EmptyState
+            icon={<Radio className="w-8 h-8 text-emerald-400" />}
+            title="Live streaming needs a real account"
+            text="Create an account and sign in on two devices: one streams its camera, the other watches it and alerts you if the camera is covered, moved or blocked."
+          />
+        )}
+
         {activeTab === 'plant' && <PlantDoctor apiBase={API_BASE} apiFetch={apiFetch} language={lang} />}
 
         {/* ========================================================

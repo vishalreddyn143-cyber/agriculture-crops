@@ -26,6 +26,15 @@ import {
   updateCamera,
   deleteCamera,
 } from './models/cameras';
+import {
+  LiveStream,
+  LiveStreamStorageUnavailableError,
+  listLiveStreams,
+  getLiveStream,
+  createLiveStream,
+  updateLiveStream,
+  endLiveStream,
+} from './models/liveStreams';
 import { DataStore, createEmptyStore, FarmProtectionPlan, EventItem, NotificationItem } from './models/store';
 
 dotenv.config();
@@ -680,6 +689,116 @@ app.post('/api/sirens/emergency-stop', (req, res) => {
   });
 });
 
+/* ------------------------------------------------------------
+   Device live streaming: a farmer signed in on two devices can
+   stream one device's camera to the other over WebRTC. Only the
+   connection handshake (SDP offer/answer) is stored here.
+------------------------------------------------------------ */
+const MAX_LIVE_STREAMS = 5;
+const LIVE_STORAGE_MESSAGE = 'Live streaming is not set up on the server yet (run supabase-schema.sql in Supabase).';
+
+// SDP is plain text starting with "v=0"; cap its size so the table can't be stuffed
+const isSdp = (value: unknown): value is string => typeof value === 'string' && value.startsWith('v=0') && value.length <= 20000;
+
+// Only what the other device needs; never another farmer's data
+const publicStream = (s: LiveStream) => ({ id: s.id, deviceName: s.deviceName, status: s.status, createdAt: s.createdAt });
+
+const liveError = (res: Response, error: any) => {
+  if (error instanceof LiveStreamStorageUnavailableError) return res.status(503).json({ success: false, message: LIVE_STORAGE_MESSAGE });
+  console.error(`❌ [VISTA-LIVE] ${error.message}`);
+  return res.status(500).json({ success: false, message: 'Live streaming hit a problem. Please try again.' });
+};
+
+// Handshake polling is frequent: allow a generous rate per farmer
+const liveLimit = rateLimit(240, 60 * 1000, (req) => req.headers.authorization || req.ip || 'unknown');
+
+// Devices of this farmer that are streaming right now
+app.get('/api/live/streams', liveLimit, async (req, res) => {
+  if (res.locals.user.demo) return res.status(200).json({ success: true, streams: [] });
+  try {
+    return res.status(200).json({ success: true, streams: (await listLiveStreams(res.locals.user.id)).map(publicStream) });
+  } catch (error) {
+    return liveError(res, error);
+  }
+});
+
+// The streaming device announces itself with its WebRTC offer
+app.post('/api/live/streams', liveLimit, async (req, res) => {
+  if (realAccountOnly(res)) return;
+  const deviceName = String(req.body.deviceName || 'My device').trim().slice(0, 60) || 'My device';
+  if (!isSdp(req.body.offer)) return res.status(400).json({ success: false, message: 'Invalid stream offer.' });
+  try {
+    if ((await listLiveStreams(res.locals.user.id)).length >= MAX_LIVE_STREAMS) {
+      return res.status(400).json({ success: false, message: `You can stream from up to ${MAX_LIVE_STREAMS} devices at once.` });
+    }
+    const stream = await createLiveStream(res.locals.user.id, deviceName, req.body.offer);
+    return res.status(201).json({ success: true, stream: publicStream(stream) });
+  } catch (error) {
+    return liveError(res, error);
+  }
+});
+
+// The streaming device checks in and picks up the viewer's answer once there is one
+app.post('/api/live/streams/:id/poll', liveLimit, async (req, res) => {
+  if (!UUID_PATTERN.test(String(req.params.id))) return res.status(404).json({ success: false, message: 'Stream not found.' });
+  try {
+    const stream = await updateLiveStream(res.locals.user.id, String(req.params.id), {});
+    if (!stream) return res.status(404).json({ success: false, message: 'Stream not found.' });
+    return res.status(200).json({ success: true, status: stream.status, answer: stream.answer });
+  } catch (error) {
+    return liveError(res, error);
+  }
+});
+
+// The streaming device makes itself available to a new viewer (after the previous one left)
+app.put('/api/live/streams/:id', liveLimit, async (req, res) => {
+  if (!UUID_PATTERN.test(String(req.params.id))) return res.status(404).json({ success: false, message: 'Stream not found.' });
+  if (!isSdp(req.body.offer)) return res.status(400).json({ success: false, message: 'Invalid stream offer.' });
+  try {
+    const stream = await updateLiveStream(res.locals.user.id, String(req.params.id), { offer: req.body.offer, answer: null, status: 'waiting' });
+    if (!stream) return res.status(404).json({ success: false, message: 'Stream not found.' });
+    return res.status(200).json({ success: true, stream: publicStream(stream) });
+  } catch (error) {
+    return liveError(res, error);
+  }
+});
+
+// A viewer fetches the offer of a waiting stream
+app.get('/api/live/streams/:id/offer', liveLimit, async (req, res) => {
+  if (!UUID_PATTERN.test(String(req.params.id))) return res.status(404).json({ success: false, message: 'Stream not found.' });
+  try {
+    const stream = await getLiveStream(res.locals.user.id, String(req.params.id));
+    if (!stream) return res.status(404).json({ success: false, message: 'That device has stopped streaming.' });
+    if (stream.status !== 'waiting') return res.status(409).json({ success: false, message: 'Another device is already watching this stream.' });
+    return res.status(200).json({ success: true, offer: stream.offer, deviceName: stream.deviceName });
+  } catch (error) {
+    return liveError(res, error);
+  }
+});
+
+// A viewer answers; only one viewer can join a waiting stream
+app.post('/api/live/streams/:id/answer', liveLimit, async (req, res) => {
+  if (!UUID_PATTERN.test(String(req.params.id))) return res.status(404).json({ success: false, message: 'Stream not found.' });
+  if (!isSdp(req.body.answer)) return res.status(400).json({ success: false, message: 'Invalid stream answer.' });
+  try {
+    const stream = await updateLiveStream(res.locals.user.id, String(req.params.id), { answer: req.body.answer, status: 'connected' }, 'waiting');
+    if (!stream) return res.status(409).json({ success: false, message: 'This stream is no longer available to join.' });
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return liveError(res, error);
+  }
+});
+
+app.delete('/api/live/streams/:id', liveLimit, async (req, res) => {
+  if (!UUID_PATTERN.test(String(req.params.id))) return res.status(404).json({ success: false, message: 'Stream not found.' });
+  try {
+    await endLiveStream(res.locals.user.id, String(req.params.id));
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return liveError(res, error);
+  }
+});
+
 /* ============================================================
                 6. EVENTS & LIFE CYCLE
 ============================================================ */
@@ -893,6 +1012,63 @@ app.post('/api/vision/detections', visionReportLimit, (req, res) => {
   store.notifications.splice(200);
 
   res.status(201).json({ success: true, event, notification, sirenTriggered: Boolean(siren) });
+});
+
+// Camera health problems spotted by the watching device (covered lens, moved camera, ...)
+const CAMERA_ISSUES: Record<string, { title: string; severity: EventItem['severity']; action: string }> = {
+  covered: { title: 'CAMERA COVERED', severity: 'HIGH', action: 'The lens is fully blocked. Check the camera now: it may have been covered on purpose.' },
+  obstructed: { title: 'CAMERA PARTLY BLOCKED', severity: 'MEDIUM', action: 'Part of the view is blocked. Check for leaves, dirt, an object or a hand in front of the lens.' },
+  moved: { title: 'CAMERA MOVED', severity: 'HIGH', action: 'The camera is pointing somewhere else. Check whether it was moved or knocked.' },
+  blurry: { title: 'CAMERA BLURRY', severity: 'LOW', action: 'The picture lost sharpness. Clean the lens and check for condensation.' },
+  frozen: { title: 'CAMERA FROZEN', severity: 'MEDIUM', action: 'The video has stopped changing. Check the device and its connection.' },
+  lost: { title: 'CAMERA OFFLINE', severity: 'HIGH', action: 'The live stream disconnected. Check the streaming device, its battery and network.' },
+};
+
+app.post('/api/vision/camera-issue', visionReportLimit, (req, res) => {
+  const issue = CAMERA_ISSUES[String(req.body.issue)];
+  if (!issue) return res.status(400).json({ success: false, message: 'Unknown camera issue.' });
+  const cameraName = typeof req.body.cameraName === 'string' ? req.body.cameraName.trim().slice(0, 60) : '';
+  const store = db(res);
+  const id = `evt-${Date.now()}`;
+  const timestamp = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
+  const event: EventItem = {
+    id,
+    eventType: 'CAMERA',
+    objectType: issue.title,
+    farmId: store.farms[0]?.id || 'farm-01',
+    fieldId: store.fields[0]?.id || 'field-01',
+    timestamp,
+    location: cameraName || 'Live stream',
+    zone: cameraName || 'Live stream',
+    confidence: 1,
+    severity: issue.severity,
+    observations: `${issue.title.toLowerCase().replace(/^./, (c) => c.toUpperCase())} on ${cameraName || 'the live stream'}.`,
+    possibleCause: 'Camera tampering, an obstruction or a device problem',
+    recommendedAction: issue.action,
+    status: 'DETECTED',
+    evidence: { imageUrl: '' },
+  };
+  store.events.unshift(event);
+  const notification: NotificationItem = {
+    id: `notif-${Date.now()}`,
+    eventId: id,
+    title: `📷 ${issue.title}`,
+    problem: event.observations,
+    objectType: 'Camera',
+    location: event.location,
+    severity: issue.severity,
+    timestamp,
+    evidenceSummary: event.observations,
+    recommendedAction: issue.action,
+    devicesTriggered: ['Web Alert'],
+    read: false,
+    channels: { web: true, mobile: false, siren: false, sms: false },
+    source: 'camera',
+  };
+  store.notifications.unshift(notification);
+  store.events.splice(200);
+  store.notifications.splice(200);
+  return res.status(201).json({ success: true, event, notification });
 });
 
 /* ============================================================

@@ -58,7 +58,7 @@ export interface Device {
 
 export interface EventItem {
   id: string;
-  eventType: 'ANIMAL' | 'INTRUDER' | 'CROP_DAMAGE' | 'WEED' | 'CROP_HEALTH' | 'VEHICLE' | 'SIREN';
+  eventType: 'ANIMAL' | 'INTRUDER' | 'CAMERA' | 'CROP_DAMAGE' | 'WEED' | 'CROP_HEALTH' | 'VEHICLE' | 'SIREN';
   objectType: string;
   trackId?: string;
   farmId: string;

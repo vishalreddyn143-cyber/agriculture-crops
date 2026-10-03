@@ -37,3 +37,21 @@ create index if not exists cameras_farmer_id_idx on public.cameras (farmer_id);
 alter table public.cameras enable row level security;
 revoke all on table public.cameras from anon, authenticated;
 grant select, insert, update, delete on table public.cameras to service_role;
+
+-- Device live streaming: the WebRTC handshake between a farmer's streaming device and the
+-- device watching it. Rows are short-lived; the video itself never passes through here.
+create table if not exists public.live_streams (
+  id uuid primary key default gen_random_uuid(),
+  farmer_id uuid not null references public.farmers(id) on delete cascade,
+  device_name text not null default 'My device',
+  offer text not null,
+  answer text,
+  status text not null default 'waiting' check (status in ('waiting', 'connected')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists live_streams_farmer_id_idx on public.live_streams (farmer_id);
+
+alter table public.live_streams enable row level security;
+revoke all on table public.live_streams from anon, authenticated;
+grant select, insert, update, delete on table public.live_streams to service_role;
