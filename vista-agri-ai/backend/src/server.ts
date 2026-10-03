@@ -13,6 +13,7 @@ import {
   FaceLoginUnavailableError,
   setFace,
   getFacePhoto,
+  getFaceDescriptor,
   FaceRecord,
   listFaceDescriptors,
 } from './models/farmerAccounts';
@@ -188,10 +189,11 @@ app.post('/api/auth/login', authAttemptLimit, async (req, res) => {
 });
 
 /* ------------------------------------------------------------
-   Face sign-in: at setup the browser takes a photo of the farmer
-   and computes its 128-number face descriptor (face-api.js); both
-   are saved. A sign-in scan (after a blink check) is matched
-   against those saved descriptors.
+   Photo sign-in: at setup the farmer confirms their password and
+   takes a photo; the browser computes its 128-number face
+   descriptor (face-api.js) and both are saved. To sign in, the
+   farmer gives their email and takes a new photo, which is matched
+   only against that account's saved photo.
 ------------------------------------------------------------ */
 // Match confidence (0-100) from the distance between two face descriptors. A logistic curve
 // centred on face-api's standard same-person boundary (distance 0.6 = 50%) and scaled so that
@@ -199,62 +201,73 @@ app.post('/api/auth/login', authAttemptLimit, async (req, res) => {
 const faceConfidence = (distance: number) => Math.round(100 / (1 + Math.exp(14.72 * (distance - 0.6))));
 // Sign-in needs at least this confidence that the two photos show the same face
 const MIN_FACE_CONFIDENCE = 95;
-// The best match must beat the runner-up by this much distance, so two similar faces can't be confused
-const FACE_MATCH_MARGIN = 0.06;
 
 const isFaceDescriptor = (value: unknown): value is number[] =>
   Array.isArray(value) && value.length === 128 && value.every((n) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < 2);
 
 const faceDistance = (a: number[], b: number[]) => Math.sqrt(a.reduce((sum, v, i) => sum + (v - b[i]) ** 2, 0));
 
-// Registered face photos: a small JPEG data URL (the browser sends about 20-40 KB)
+// Registered face photos: a small JPEG data URL (the browser sends about 30-60 KB)
 const FACE_PHOTO_PATTERN = /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/;
 const isFacePhoto = (value: unknown): value is string =>
   typeof value === 'string' && value.length <= 300_000 && FACE_PHOTO_PATTERN.test(value);
 
-const FACE_UNAVAILABLE_MESSAGE = 'Face sign-in is not set up on the server yet. Please sign in with your email and password.';
+const FACE_UNAVAILABLE_MESSAGE = 'Photo sign-in is not set up on the server yet. Please sign in with your email and password.';
+// One message for every failure, so it never reveals whether an email is registered or has photo sign-in
+const FACE_MISMATCH_MESSAGE = `That photo did not match the saved photo for this email closely enough (${MIN_FACE_CONFIDENCE}% needed). Face the light, look straight at the camera and try again.`;
+
+// After this many failed photo sign-ins, photo sign-in for that email is locked for a while
+const FACE_MAX_FAILURES = 5;
+const FACE_LOCKOUT_MS = 15 * 60 * 1000;
+const faceFailures = new Map<string, { count: number; lockedUntil: number }>();
 
 app.post('/api/auth/face/login', authAttemptLimit, async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
   const { descriptor } = req.body;
-  if (!isFaceDescriptor(descriptor)) {
-    return res.status(400).json({ success: false, message: 'No face was captured. Please try again.' });
+  if (!email || !isFaceDescriptor(descriptor)) {
+    return res.status(400).json({ success: false, message: 'Enter your email and take a photo to sign in.' });
   }
-  let candidates;
+  const failures = faceFailures.get(email);
+  if (failures && failures.lockedUntil > Date.now()) {
+    const minutes = Math.ceil((failures.lockedUntil - Date.now()) / 60000);
+    return res.status(429).json({
+      success: false,
+      message: `Too many photo attempts. Photo sign-in is paused for ${minutes} minute${minutes === 1 ? '' : 's'}; sign in with your password instead.`,
+    });
+  }
+
+  let account: FarmerAccount | null;
+  let saved: number[] | null = null;
   try {
-    candidates = await listFaceDescriptors();
+    account = await findFarmerByEmail(email);
+    if (account?.hasFaceLogin) saved = await getFaceDescriptor(account.id);
   } catch (error: any) {
     if (error instanceof FaceLoginUnavailableError) return res.status(503).json({ success: false, message: FACE_UNAVAILABLE_MESSAGE });
     console.error(`❌ [VISTA-AUTH] ${error.message}`);
     return res.status(500).json({ success: false, message: 'Could not sign you in. Please try again.' });
   }
-  const ranked = candidates
-    .map((c) => ({ account: c.account, distance: faceDistance(descriptor, c.descriptor) }))
-    .sort((a, b) => a.distance - b.distance);
-  const [best, runnerUp] = ranked;
-  if (!best) {
-    return res.status(401).json({ success: false, message: 'No account has face sign-in set up yet. Sign in with your email and password.' });
+
+  // Compared only with this one account's photo; no score is returned on failure, so fake face data can't be tuned towards a match
+  const similarity = account && saved ? faceConfidence(faceDistance(descriptor, saved)) : 0;
+  if (!account || !saved || similarity < MIN_FACE_CONFIDENCE) {
+    const count = (failures?.count || 0) + 1;
+    faceFailures.set(email, { count, lockedUntil: count >= FACE_MAX_FAILURES ? Date.now() + FACE_LOCKOUT_MS : 0 });
+    if (faceFailures.size > 10000) faceFailures.clear();
+    return res.status(401).json({ success: false, message: FACE_MISMATCH_MESSAGE });
   }
-  const similarity = faceConfidence(best.distance);
-  if (similarity < MIN_FACE_CONFIDENCE || (runnerUp && runnerUp.distance - best.distance < FACE_MATCH_MARGIN)) {
-    // The score helps the farmer retake a better photo; no account details are revealed
-    return res.status(401).json({
-      success: false,
-      similarity,
-      message: `Face match was ${similarity}%, but ${MIN_FACE_CONFIDENCE}% is needed. Face the light, look straight at the camera and try again.`,
-    });
-  }
-  // Only the matched farmer's own registered photo is returned, to show beside their live scan
+  faceFailures.delete(email);
+
   let savedPhoto: string | null = null;
   try {
-    savedPhoto = await getFacePhoto(best.account.id);
+    savedPhoto = await getFacePhoto(account.id);
   } catch {
     // The photo is only for display; sign-in still succeeds without it
   }
   return res.status(200).json({
     success: true,
-    message: `Welcome back, ${best.account.fullName.split(' ')[0]}`,
-    user: publicUser(best.account),
-    token: signToken(best.account),
+    message: `Welcome back, ${account.fullName.split(' ')[0]}`,
+    user: publicUser(account),
+    token: signToken(account),
     savedPhoto,
     similarity,
   });
@@ -274,32 +287,38 @@ app.get('/api/auth/me', (req, res) => {
   res.status(200).json({ success: true, user: res.locals.user });
 });
 
-// Registers (PUT) or removes (DELETE) the signed-in farmer's face. Returns a fresh token
-// because the token carries the profile, including whether face sign-in is on.
+// Registers (PUT) or removes (DELETE) the signed-in farmer's photo. Returns a fresh token
+// because the token carries the profile, including whether photo sign-in is on.
 const updateFace = async (req: Request, res: Response, face: FaceRecord | null) => {
   if (res.locals.user.demo) {
-    return res.status(400).json({ success: false, message: 'Face sign-in needs a real account. Create one to use it.' });
+    return res.status(400).json({ success: false, message: 'Photo sign-in needs a real account. Create one to use it.' });
   }
   try {
     if (face) {
+      // Setting up photo sign-in needs the password, so a stolen session can't register someone else's face
+      const owner = await findFarmerByEmail(res.locals.user.email);
+      if (!owner || !(await bcrypt.compare(String(req.body.password || ''), owner.passwordHash))) {
+        return res.status(401).json({ success: false, message: 'Incorrect password. Enter your account password to save your photo.' });
+      }
       // One face per account: refuse a face that already opens someone else's account
       const others = (await listFaceDescriptors()).filter((c) => c.account.id !== res.locals.user.id);
       if (others.some((c) => faceConfidence(faceDistance(face.descriptor, c.descriptor)) >= MIN_FACE_CONFIDENCE)) {
-        return res.status(409).json({ success: false, message: 'This face is already linked to another account.' });
+        // Generic on purpose: saying the face belongs to another account would reveal who is registered
+        return res.status(409).json({ success: false, message: 'This photo cannot be used for photo sign-in. Please try a different photo.' });
       }
     }
     const account = await setFace(res.locals.user.id, face);
     if (!account) return res.status(404).json({ success: false, message: 'Account not found. Please sign in again.' });
     return res.status(200).json({
       success: true,
-      message: face ? 'Face sign-in is on. Next time, just scan your face to sign in.' : 'Face sign-in removed.',
+      message: face ? 'Photo sign-in is on.' : 'Photo sign-in removed.',
       user: publicUser(account),
       token: signToken(account),
     });
   } catch (error: any) {
     if (error instanceof FaceLoginUnavailableError) return res.status(503).json({ success: false, message: FACE_UNAVAILABLE_MESSAGE });
     console.error(`❌ [VISTA-AUTH] ${error.message}`);
-    return res.status(500).json({ success: false, message: 'Could not update face sign-in. Please try again.' });
+    return res.status(500).json({ success: false, message: 'Could not update photo sign-in. Please try again.' });
   }
 };
 

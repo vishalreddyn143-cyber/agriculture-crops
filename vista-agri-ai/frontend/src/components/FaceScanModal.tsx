@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Loader2, ScanFace, X, CheckCircle2, AlertTriangle, Camera, RotateCcw } from 'lucide-react';
+import { Loader2, ScanFace, X, CheckCircle2, AlertTriangle, Camera, RotateCcw, Lock } from 'lucide-react';
 
 // face-api.js models, used only to compare the face in two photos once they are taken
 const MODEL_URL = '/models/face';
@@ -53,8 +53,8 @@ export interface FaceCaptureResult {
 
 interface FaceScanModalProps {
   mode: 'enroll' | 'login';
-  // Receives the photo the user took and the face descriptor computed from it
-  onCapture: (capture: { descriptor: number[]; photo: string }) => Promise<FaceCaptureResult>;
+  // Receives the photo the user took, the face descriptor computed from it and, at setup, the account password
+  onCapture: (capture: { descriptor: number[]; photo: string; password?: string }) => Promise<FaceCaptureResult>;
   // Called after the success screen has been shown
   onSuccess: () => void;
   onClose: () => void;
@@ -67,6 +67,8 @@ export function FaceScanModal({ mode, onCapture, onSuccess, onClose }: FaceScanM
   const [attempt, setAttempt] = useState(0);
   const [photo, setPhoto] = useState<{ dataUrl: string; descriptor: number[] } | null>(null);
   const [match, setMatch] = useState<{ saved: string | null; similarity: number } | null>(null);
+  // Setup: the account password, confirmed before the photo is saved
+  const [password, setPassword] = useState('');
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -152,13 +154,24 @@ export function FaceScanModal({ mode, onCapture, onSuccess, onClose }: FaceScanM
   };
 
   const submit = async (taken: { dataUrl: string; descriptor: number[] }) => {
+    setError('');
     setStep('submitting');
     setMessage(mode === 'enroll' ? 'Saving your photo…' : 'Matching with your saved photo…');
-    const result = await callbacksRef.current.onCapture({ descriptor: taken.descriptor, photo: taken.dataUrl });
+    const result = await callbacksRef.current.onCapture({
+      descriptor: taken.descriptor,
+      photo: taken.dataUrl,
+      ...(mode === 'enroll' ? { password } : {}),
+    });
     if (result.error) {
+      // A wrong password at setup keeps the photo, so only the password needs re-entering
+      if (mode === 'enroll' && /password/i.test(result.error)) {
+        setStep('review');
+        setError(result.error);
+        setPassword('');
+        return;
+      }
       setStep('error');
       setError(result.error);
-      if (mode === 'login' && result.similarity !== undefined) setMatch({ saved: null, similarity: result.similarity });
       return;
     }
     if (mode === 'login') {
@@ -175,6 +188,7 @@ export function FaceScanModal({ mode, onCapture, onSuccess, onClose }: FaceScanM
 
   const retake = () => {
     setError('');
+    setPassword('');
     setMessage('');
     setPhoto(null);
     setMatch(null);
@@ -196,8 +210,8 @@ export function FaceScanModal({ mode, onCapture, onSuccess, onClose }: FaceScanM
         </h2>
         <p className="text-xs text-emerald-200/80 mt-1">
           {mode === 'enroll'
-            ? 'Take a photo of yourself. It is saved to your account, and sign-in photos are matched against it.'
-            : 'Take a photo of yourself. It is matched against the photo saved to your account (95% needed).'}
+            ? 'Take a photo of yourself and confirm your password. The photo is saved to your account, and sign-in photos are matched against it.'
+            : 'Take a photo of yourself. It is matched against the photo saved to this account (95% needed).'}
         </p>
 
         {/* Camera (kept mounted while hidden so the stream has an element to attach to) */}
@@ -261,20 +275,43 @@ export function FaceScanModal({ mode, onCapture, onSuccess, onClose }: FaceScanM
             </button>
           </div>
         ) : step === 'review' ? (
-          <div className="mt-5 grid grid-cols-2 gap-2">
-            <button
-              onClick={retake}
-              className="bg-white/10 hover:bg-white/20 text-white font-bold py-2.5 rounded-xl border border-white/30 transition flex items-center justify-center gap-2"
-            >
-              <RotateCcw className="w-4 h-4" /> Retake
-            </button>
-            <button
-              onClick={() => photo && submit(photo)}
-              className="bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-black py-2.5 rounded-xl transition flex items-center justify-center gap-2"
-            >
-              <CheckCircle2 className="w-4 h-4" /> Save this photo
-            </button>
-          </div>
+          <form
+            className="mt-5 space-y-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (photo && password) submit(photo);
+            }}
+          >
+            <div className="relative">
+              <Lock className="w-4 h-4 text-emerald-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Your account password"
+                autoComplete="current-password"
+                autoFocus
+                className="w-full bg-emerald-950/60 border border-emerald-500/30 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white placeholder:text-emerald-200/50 focus:outline-none focus:border-emerald-400"
+              />
+            </div>
+            {error && <p className="text-xs text-amber-200">{error}</p>}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={retake}
+                className="bg-white/10 hover:bg-white/20 text-white font-bold py-2.5 rounded-xl border border-white/30 transition flex items-center justify-center gap-2"
+              >
+                <RotateCcw className="w-4 h-4" /> Retake
+              </button>
+              <button
+                type="submit"
+                disabled={!password}
+                className="bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-black py-2.5 rounded-xl transition disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <CheckCircle2 className="w-4 h-4" /> Save this photo
+              </button>
+            </div>
+          </form>
         ) : step === 'camera' ? (
           <button
             onClick={takePhoto}

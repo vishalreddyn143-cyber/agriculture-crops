@@ -63,11 +63,16 @@ const loadLocalStore = () => {
 
 const saveLocalStore = () => {
   try {
-    fs.mkdirSync(path.dirname(LOCAL_STORE_FILE), { recursive: true });
+    // Owner-only permissions: the file holds password hashes and photos
+    fs.mkdirSync(path.dirname(LOCAL_STORE_FILE), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(LOCAL_STORE_FILE), 0o700);
     fs.writeFileSync(
       LOCAL_STORE_FILE,
       JSON.stringify({ accounts: [...memoryAccounts.values()], faces: Object.fromEntries(memoryFaces) }, null, 2),
+      { mode: 0o600 },
     );
+    // writeFileSync's mode only applies when creating the file, so tighten an existing one too
+    fs.chmodSync(LOCAL_STORE_FILE, 0o600);
   } catch (error: any) {
     // Read-only filesystems (e.g. serverless) keep accounts in memory only
     console.warn(`⚠️ [VISTA-AUTH] Could not save local accounts: ${error.message}`);
@@ -177,4 +182,16 @@ export const getFacePhoto = async (farmerId: string): Promise<string | null> => 
     throw new Error(`Supabase lookup failed: ${error.message}`);
   }
   return data?.face_photo || null;
+};
+
+// The farmer's registered face descriptor, or null if they have none
+export const getFaceDescriptor = async (farmerId: string): Promise<number[] | null> => {
+  const supabase = getSupabase();
+  if (!supabase) return memoryFaces.get(farmerId)?.descriptor || null;
+  const { data, error } = await supabase.from('farmers').select('face_descriptor').eq('id', farmerId).maybeSingle();
+  if (error) {
+    if (isMissingFaceColumn(error)) throw new FaceLoginUnavailableError();
+    throw new Error(`Supabase lookup failed: ${error.message}`);
+  }
+  return Array.isArray(data?.face_descriptor) ? data.face_descriptor : null;
 };

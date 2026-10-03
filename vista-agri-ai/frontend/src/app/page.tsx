@@ -477,12 +477,12 @@ function VistaAgriApp({ authUser, apiFetch, onLogout, onSessionUpdate }: VistaAg
   };
 
   // Face sign-in: save this farmer's face photo (and the descriptor computed from it), or remove it
-  const saveFaceLogin = async ({ descriptor, photo }: { descriptor: number[]; photo: string }): Promise<FaceCaptureResult> => {
+  const saveFaceLogin = async ({ descriptor, photo, password }: { descriptor: number[]; photo: string; password?: string }): Promise<FaceCaptureResult> => {
     try {
       const res = await apiFetch(`${API_BASE}/auth/face`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ descriptor, photo }),
+        body: JSON.stringify({ descriptor, photo, password }),
       });
       const data = await res.json();
       if (!res.ok || !data.success) return { error: data.message || 'Could not save your face. Please try again.' };
